@@ -137,9 +137,21 @@ def recent_chats(limit: int = 20) -> list[dict]:
 
 
 def find_chats(identifier: str) -> list[dict]:
-    """Find DM and group chats by phone digits or identifier."""
+    """Find DM and group chats by phone digits, identifier, or contact name."""
     digits = re.sub(r"\D", "", identifier)
     if not digits:
+        # No digits — treat as a name, resolve to phone numbers via contacts
+        contacts = search_contacts(identifier)
+        if contacts:
+            all_results = []
+            seen = set()
+            for c in contacts:
+                for phone in c["phones"]:
+                    for r in find_chats(phone):
+                        if r["ROWID"] not in seen:
+                            seen.add(r["ROWID"])
+                            all_results.append(r)
+            return all_results
         digits = identifier
     conn = _connect_messages()
     # DM chats
