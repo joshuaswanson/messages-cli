@@ -61,6 +61,22 @@ def extract_attributed_body(blob: bytes | None) -> str | None:
         return None
 
 
+def _has_digits(s: str) -> bool:
+    return bool(re.search(r"\d", s))
+
+
+def resolve_identifier(identifier: str) -> str:
+    if _has_digits(identifier):
+        return identifier
+    contacts = search_contacts(identifier)
+    if not contacts:
+        return identifier
+    phones = contacts[0]["phones"]
+    if not phones:
+        return identifier
+    return phones[0]
+
+
 def search_contacts(name: str) -> list[dict]:
     """Search all AddressBook sources for contacts matching name.
 
