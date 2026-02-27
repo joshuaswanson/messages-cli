@@ -65,9 +65,33 @@ def _has_digits(s: str) -> bool:
     return bool(re.search(r"\d", s))
 
 
+def _find_chat_by_display_name(name: str) -> str | None:
+    conn = _connect_messages()
+    row = conn.execute(
+        f"""
+        SELECT c.chat_identifier
+        FROM chat c
+        JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
+        JOIN message m ON cmj.message_id = m.ROWID
+        WHERE c.display_name LIKE ?
+        GROUP BY c.ROWID
+        ORDER BY MAX(m.date) DESC
+        LIMIT 1
+        """,
+        (f"%{name}%",),
+    ).fetchone()
+    conn.close()
+    return row["chat_identifier"] if row else None
+
+
 def resolve_identifier(identifier: str) -> str:
     if _has_digits(identifier):
         return identifier
+    # Try group chat display name first
+    chat_id = _find_chat_by_display_name(identifier)
+    if chat_id:
+        return chat_id
+    # Fall back to contact name resolution
     contacts = search_contacts(identifier)
     if not contacts:
         return identifier
