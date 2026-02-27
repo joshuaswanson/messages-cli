@@ -2,7 +2,7 @@
 
 CLI for reading, searching, and sending iMessages on macOS.
 
-Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly and sends messages via AppleScript. Anywhere a phone number is accepted, you can use a contact name instead — it resolves automatically.
+Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly and sends messages via AppleScript. Anywhere a phone number is accepted, you can use a contact name instead.
 
 ## Install
 
