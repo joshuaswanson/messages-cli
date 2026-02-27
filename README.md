@@ -25,8 +25,9 @@ messages chats recent --limit 10
 messages chats find "John"
 messages chats find "+15551234567"
 
-# Read messages from a chat (by name, phone, or chat_id)
+# Read messages (by contact name, group chat name, phone, or chat_id)
 messages read "John" --limit 30
+messages read "Family Group Chat"
 messages read "+15551234567"
 
 # Search message content
