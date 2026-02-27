@@ -1,0 +1,15 @@
+[project]
+name = "messages-cli"
+version = "0.1.0"
+description = "CLI for macOS Messages — read, search, and send iMessages"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+]
+
+[project.scripts]
+messages = "messages_cli.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
