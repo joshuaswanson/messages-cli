@@ -79,6 +79,7 @@ def chats_find(identifier: str):
 @click.option("--limit", default=20, help="Number of messages to show.")
 def read_cmd(chat_id: str, limit: int):
     """Read messages from a chat."""
+    chat_id = db.resolve_identifier(chat_id)
     messages = db.read_messages(chat_id, limit)
     if not messages:
         click.echo("No messages found.")
@@ -114,6 +115,7 @@ def search_cmd(query: str, limit: int):
 @click.option("--confirm", is_flag=True, help="Actually send (required).")
 def send_cmd(phone: str, message: str, confirm: bool):
     """Send an iMessage. Requires --confirm flag."""
+    phone = db.resolve_identifier(phone)
     if not confirm:
         click.echo(f"Would send to {phone}: {message}")
         click.echo("Pass --confirm to actually send.")
