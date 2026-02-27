@@ -226,8 +226,54 @@ def find_chats(identifier: str) -> list[dict]:
     return results
 
 
+def _resolve_handle_to_name(handle: str) -> str | None:
+    digits = re.sub(r"\D", "", handle)
+    if not digits:
+        return None
+    pattern = f"%{digits[-10:]}%"
+    try:
+        sources = list(CONTACTS_DIR.iterdir()) if CONTACTS_DIR.exists() else []
+    except PermissionError:
+        return None
+    for source in sources:
+        db_path = source / "AddressBook-v22.abcddb"
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT ZFIRSTNAME, ZLASTNAME
+                FROM ZABCDRECORD
+                JOIN ZABCDPHONENUMBER ON ZABCDRECORD.Z_PK = ZABCDPHONENUMBER.ZOWNER
+                WHERE REPLACE(REPLACE(REPLACE(REPLACE(ZFULLNUMBER, ' ', ''), '-', ''), '(', ''), ')', '') LIKE ?
+                LIMIT 1
+                """,
+                (pattern,),
+            ).fetchone()
+            conn.close()
+            if row:
+                first = row["ZFIRSTNAME"] or ""
+                last = row["ZLASTNAME"] or ""
+                name = f"{first} {last}".strip()
+                if name:
+                    return name
+        except Exception:
+            continue
+    return None
+
+
+def _build_contact_cache(handles: list[str]) -> dict[str, str]:
+    cache = {}
+    for handle in handles:
+        name = _resolve_handle_to_name(handle)
+        if name:
+            cache[handle] = name
+    return cache
+
+
 def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
-    """Read messages from a chat, handling attributedBody extraction."""
     conn = _connect_messages()
     rows = conn.execute(
         f"""
@@ -249,12 +295,20 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
     ).fetchall()
     conn.close()
 
+    # Resolve phone numbers to contact names
+    handles = {r["handle"] for r in rows if r["handle"] and not r["is_from_me"]}
+    name_cache = _build_contact_cache(list(handles))
+
     messages = []
     for r in rows:
         content = r["text"] or extract_attributed_body(r["attributedBody"])
         if not content:
             continue
-        sender = "Me" if r["is_from_me"] else (r["handle"] or "Unknown")
+        if r["is_from_me"]:
+            sender = "Me"
+        else:
+            handle = r["handle"] or "Unknown"
+            sender = name_cache.get(handle, handle)
         edited = r["date_edited"] and r["date_edited"] > 0
         messages.append(
             {
