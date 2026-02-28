@@ -50,6 +50,11 @@ John Smith, Sarah Chen, Alex
 Works with contact names, group chat names, phone numbers, or chat IDs. Long messages are truncated to one line by default.
 
 ```bash
+$ messages read "Book Club" --limit 3          # by group chat name
+$ messages read "Sarah" --limit 3              # by contact name
+$ messages read "+1 206-555-1234" --limit 3    # by phone number
+$ messages read "chat584932" --limit 3         # by chat ID
+
 $ messages read "Book Club" --limit 5
 2026-02-26 19:55:00  John Smith   Has everyone finished the book?
 2026-02-26 19:56:12  Sarah Chen   Almost done!
@@ -76,11 +81,14 @@ $ messages search "dinner" --limit 3
 Works with contact names, group chat names, or phone numbers.
 
 ```bash
-$ messages send "John" "Hey, are we still on for tomorrow?"
-Would send to +1 206-555-1234: Hey, are we still on for tomorrow?
+$ messages send "Sarah" "Hey, are we still on for tomorrow?"          # by name
+$ messages send "+1 415-555-9876" "Hey, are we still on for tomorrow?"  # by phone
+
+$ messages send "Sarah" "Hey, are we still on for tomorrow?"
+Would send to +1 415-555-9876: Hey, are we still on for tomorrow?
 Pass --confirm to actually send.
 
-$ messages send "John" "Hey, are we still on for tomorrow?" --confirm
+$ messages send "Sarah" "Hey, are we still on for tomorrow?" --confirm
 Message sent.
 ```
 
