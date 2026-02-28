@@ -77,7 +77,7 @@ def _format_message(m: dict, full: bool) -> str:
 
 @click.group()
 def cli():
-    """CLI for macOS Messages."""
+    """CLI for local message databases (iMessage, Telegram, WhatsApp)."""
 
 
 # --- contacts ---
@@ -238,3 +238,119 @@ def send_cmd(phone: str, message: str, confirm: bool):
         return
     result = send.send_message(phone, message)
     click.echo(result)
+
+
+# ---------------------------------------------------------------------------
+# Telegram commands
+# ---------------------------------------------------------------------------
+
+
+@cli.group("telegram")
+def telegram():
+    """Telegram commands."""
+
+
+@telegram.command("chats")
+@click.option("--limit", default=20, help="Number of chats to show.")
+def telegram_chats(limit: int):
+    """List recent Telegram chats."""
+    from .telegram_db import TelegramDB
+
+    tdb = TelegramDB()
+    try:
+        chats = tdb.recent_chats(limit)
+        if not chats:
+            click.echo("No chats found.")
+            return
+        name_width = max(len(c["name"]) for c in chats)
+        for c in chats:
+            name_col = click.style(c["name"].ljust(name_width), bold=True)
+            ts_col = click.style(c["last_message"], fg=DIM)
+            extra = ""
+            if c["username"]:
+                extra = f"  {click.style('@' + c['username'], fg=DIM)}"
+            peer = click.style(str(c["peer_id"]), fg=DIM)
+            click.echo(f"{name_col}  {ts_col}{extra}  {peer}")
+    finally:
+        tdb.close()
+
+
+@telegram.command("find")
+@click.argument("query")
+def telegram_find(query: str):
+    """Find Telegram chats by name or username."""
+    from .telegram_db import TelegramDB
+
+    tdb = TelegramDB()
+    try:
+        results = tdb.find_chats(query)
+        if not results:
+            click.echo("No chats found.")
+            return
+        for c in results:
+            name = click.style(c["name"], bold=True)
+            extra = f"  @{c['username']}" if c["username"] else ""
+            peer = click.style(str(c["peer_id"]), fg=DIM)
+            click.echo(f"{name}{extra}  {peer}")
+    finally:
+        tdb.close()
+
+
+@telegram.command("read")
+@click.argument("peer_id", type=int)
+@click.option("--limit", default=20, help="Number of messages to show.")
+@click.option("--full", is_flag=True, help="Show full message text.")
+def telegram_read(peer_id: int, limit: int, full: bool):
+    """Read messages from a Telegram chat by peer ID."""
+    from .telegram_db import TelegramDB
+
+    tdb = TelegramDB()
+    try:
+        messages = tdb.read_messages(peer_id, limit)
+        if not messages:
+            click.echo("No messages found.")
+            return
+        for m in reversed(messages):
+            click.echo(_format_message(m, full))
+    finally:
+        tdb.close()
+
+
+@telegram.command("search")
+@click.argument("query")
+@click.option("--limit", default=20, help="Number of results.")
+@click.option("--full", is_flag=True, help="Show full message text.")
+def telegram_search(query: str, limit: int, full: bool):
+    """Search Telegram messages."""
+    from .telegram_db import TelegramDB
+
+    tdb = TelegramDB()
+    try:
+        results = tdb.search_messages(query, limit)
+        if not results:
+            click.echo("No messages found.")
+            return
+        for r in results:
+            ts = click.style(r["timestamp"], fg=DIM)
+            chat = click.style(r["chat_name"], fg=SENDER_OTHER)
+            sender_text = r["sender"]
+            is_me = sender_text == "Me"
+            sender = click.style(sender_text, fg=SENDER_ME if is_me else SENDER_OTHER)
+            text = _truncate(r["text"], full)
+            click.echo(f"{ts}  {chat}  {sender}  {text}")
+    finally:
+        tdb.close()
+
+
+@telegram.command("stats")
+def telegram_stats():
+    """Show Telegram database statistics."""
+    from .telegram_db import TelegramDB
+
+    tdb = TelegramDB()
+    try:
+        s = tdb.stats()
+        click.echo(f"Messages: {s['messages']}")
+        click.echo(f"Peers: {s['peers']}")
+    finally:
+        tdb.close()
