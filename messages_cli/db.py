@@ -53,7 +53,7 @@ def extract_attributed_body(blob: bytes | None) -> str | None:
         if end < 0:
             end = min(len(raw), 2000)
         content = raw[:end].decode("utf-8", errors="replace").strip()
-        content = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", content)
+        content = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffc]", "", content)
         # Strip trailing binary garbage (replacement chars + stray bytes)
         content = re.sub(r"[\ufffd].*$", "", content).strip()
         return content or None
@@ -282,7 +282,9 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
                m.text,
                m.attributedBody,
                h.id as handle,
-               m.date_edited
+               m.date_edited,
+               m.associated_message_type,
+               m.ROWID as message_id
         FROM message m
         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
         JOIN chat c ON cmj.chat_id = c.ROWID
@@ -293,7 +295,36 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
         """,
         (chat_id, limit),
     ).fetchall()
+
+    # Get attachments for these messages
+    message_ids = [r["message_id"] for r in rows]
+    attachment_map: dict[int, list[str]] = {}
+    if message_ids:
+        placeholders = ",".join("?" * len(message_ids))
+        att_rows = conn.execute(
+            f"""
+            SELECT maj.message_id, a.filename, a.mime_type, a.transfer_name
+            FROM message_attachment_join maj
+            JOIN attachment a ON maj.attachment_id = a.ROWID
+            WHERE maj.message_id IN ({placeholders})
+            """,
+            message_ids,
+        ).fetchall()
+        for a in att_rows:
+            mid = a["message_id"]
+            name = a["transfer_name"] or a["filename"] or "attachment"
+            if "pluginPayloadAttachment" in name:
+                continue
+            mime = a["mime_type"] or ""
+            label = mime.split("/")[0] if "/" in mime else "file"
+            attachment_map.setdefault(mid, []).append(f"[{label}: {name}]")
+
     conn.close()
+
+    TAPBACK_TYPES = {
+        2000: "Loved", 2001: "Liked", 2002: "Disliked",
+        2003: "Laughed at", 2004: "Emphasized", 2005: "Questioned",
+    }
 
     # Resolve phone numbers to contact names
     handles = {r["handle"] for r in rows if r["handle"] and not r["is_from_me"]}
@@ -301,9 +332,29 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
 
     messages = []
     for r in rows:
-        content = r["text"] or extract_attributed_body(r["attributedBody"])
-        if not content:
-            continue
+        assoc_type = r["associated_message_type"] or 0
+
+        # Tapback reactions
+        if assoc_type in TAPBACK_TYPES:
+            reaction = TAPBACK_TYPES[assoc_type]
+            body = r["text"] or extract_attributed_body(r["attributedBody"]) or ""
+            # Strip redundant reaction prefix from body (e.g. 'Loved "msg"' -> '"msg"')
+            for prefix in ("Loved ", "Liked ", "Disliked ", "Laughed at ", "Emphasized ", "Questioned "):
+                if body.startswith(prefix):
+                    body = body[len(prefix):]
+                    break
+            content = f'[{reaction}] {body}'
+        elif assoc_type >= 3000:
+            continue  # reaction removal, skip
+        else:
+            content = r["text"] or extract_attributed_body(r["attributedBody"])
+            attachments = attachment_map.get(r["message_id"], [])
+            if attachments:
+                att_str = " ".join(attachments)
+                content = f"{content} {att_str}" if content else att_str
+            if not content:
+                continue
+
         if r["is_from_me"]:
             sender = "Me"
         else:
