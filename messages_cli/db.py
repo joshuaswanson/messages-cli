@@ -156,6 +156,22 @@ def search_contacts(name: str) -> list[dict]:
     ]
 
 
+def _get_chat_participants(conn: sqlite3.Connection, chat_identifier: str) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT h.id
+        FROM handle h
+        JOIN chat_handle_join chj ON h.ROWID = chj.handle_id
+        JOIN chat c ON chj.chat_id = c.ROWID
+        WHERE c.chat_identifier = ?
+        """,
+        (chat_identifier,),
+    ).fetchall()
+    handles = [r["id"] for r in rows]
+    cache = _build_contact_cache(handles)
+    return [cache.get(h, h) for h in handles]
+
+
 def recent_chats(limit: int = 20) -> list[dict]:
     """List recent chats with last message time."""
     conn = _connect_messages()
