@@ -1,6 +1,6 @@
 # messages-cli
 
-CLI for reading and searching local message databases (iMessage, Telegram, WhatsApp) on macOS.
+A unified CLI for reading, searching, and sending messages across all your messaging apps from the terminal. Supports iMessage, SMS/RCS, and Telegram on macOS.
 
 ## Platforms
 

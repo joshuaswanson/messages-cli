@@ -105,7 +105,7 @@ def _format_message(m: dict, full: bool) -> str:
 
 @click.group()
 def cli():
-    """CLI for local message databases (iMessage, Telegram, WhatsApp)."""
+    """Unified CLI for all your messaging apps."""
 
 
 # --- contacts ---
