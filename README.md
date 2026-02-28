@@ -27,18 +27,22 @@ John Smith
 ### List recent chats
 
 ```bash
-$ messages chats recent --limit 3
-+12065551234           2026-02-28 14:30:12
-+14155559876           2026-02-27 09:15:43
-chat927461038  Book Club  2026-02-26 20:00:01
+$ messages chats recent --limit 4
+John Smith                    2026-02-28 14:30:12  +12065551234
+Sarah Chen                    2026-02-27 09:15:43  +14155559876
+Book Club                     2026-02-26 20:00:01
+John Smith, Sarah Chen, Alex  2026-02-25 18:00:00
 ```
+
+Phone numbers and group chat participants are resolved to contact names automatically. Unnamed group chats show participant names.
 
 ### Find chats with a person
 
 ```bash
 $ messages chats find "John"
-+12065551234
-chat927461038  Book Club
+John Smith                     +12065551234
+Book Club
+John Smith, Sarah Chen, Alex
 ```
 
 ### Read messages
