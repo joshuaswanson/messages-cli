@@ -608,15 +608,18 @@ class TelegramDB:
                 "peer_id": peer_id,
                 "name": name,
                 "username": peer.get("username", ""),
+                "phone": peer.get("phone", ""),
                 "last_message": ts,
             })
 
         return chats
 
     def find_chats(self, query: str) -> list[dict]:
-        """Find chats by name or username substring."""
+        """Find chats by name, username, or phone substring."""
+        import re as _re
         self._ensure_connection()
         query_lower = query.lower()
+        query_digits = _re.sub(r"\D", "", query)
 
         # Get all known peers from t2
         rows = self._conn.execute("SELECT key, value FROM t2").fetchall()
@@ -628,15 +631,54 @@ class TelegramDB:
                 continue
             self._peer_cache[peer_id] = peer
             name = _peer_display_name(peer)
-            searchable = f"{name} {peer.get('username', '')}".lower()
-            if query_lower in searchable:
+            searchable = f"{name} {peer.get('username', '')} {peer.get('phone', '')}".lower()
+            # Match by text substring or by phone digits
+            phone_digits = _re.sub(r"\D", "", peer.get("phone", ""))
+            if query_lower in searchable or (query_digits and query_digits in phone_digits):
                 results.append({
                     "peer_id": peer_id,
                     "name": name,
                     "username": peer.get("username", ""),
+                    "phone": peer.get("phone", ""),
                 })
 
         return results
+
+    def find_peer_by_phone(self, phone_digits: str) -> int | None:
+        """Find a peer_id by phone number digits."""
+        self._ensure_connection()
+        import re
+        digits = re.sub(r"\D", "", phone_digits)
+        if not digits:
+            return None
+        rows = self._conn.execute("SELECT key, value FROM t2").fetchall()
+        for peer_id, value in rows:
+            peer = _parse_peer(value)
+            if peer is None:
+                continue
+            self._peer_cache[peer_id] = peer
+            peer_phone = re.sub(r"\D", "", peer.get("phone", ""))
+            if peer_phone and digits in peer_phone:
+                return peer_id
+        return None
+
+    def resolve_identifier(self, identifier: str) -> int | None:
+        """Resolve a name, phone, or peer_id string to a peer_id int."""
+        import re
+        stripped = identifier.strip()
+        # Pure digits and large -> treat as peer_id directly
+        if stripped.isdigit() and int(stripped) > 100000:
+            return int(stripped)
+        # Contains digits -> try phone lookup
+        if re.search(r"\d", stripped):
+            result = self.find_peer_by_phone(stripped)
+            if result is not None:
+                return result
+        # Name lookup
+        matches = self.find_chats(stripped)
+        if matches:
+            return matches[0]["peer_id"]
+        return None
 
     def read_messages(self, peer_id: int, limit: int = 20) -> list[dict]:
         """Read messages from a specific chat."""

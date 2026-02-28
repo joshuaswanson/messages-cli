@@ -1,9 +1,9 @@
 """CLI entry point for messages-cli."""
 
-import phonenumbers
 import click
+import phonenumbers
 
-from . import db, send
+from . import db, send, backends
 
 # Colors
 DIM = "bright_black"
@@ -12,6 +12,13 @@ SENDER_OTHER = "cyan"
 EDITED = "yellow"
 REACTION = "magenta"
 ATTACHMENT = "yellow"
+
+PLATFORM_TAGS = {
+    "messages": "ms",
+    "telegram": "tg",
+}
+
+VALID_PLATFORMS = ("messages", "telegram")
 
 
 def _format_phone(value: str) -> str:
@@ -34,6 +41,27 @@ def _truncate(text: str, full: bool) -> str:
     if "\n" in text:
         return first_line + " [...]"
     return first_line
+
+
+def _platform_tag(platform: str) -> str:
+    """Return a dim [im] or [tg] tag."""
+    tag = PLATFORM_TAGS.get(platform, platform[:2])
+    return click.style(f"[{tag}]", fg=DIM)
+
+
+def _validate_platform(ctx, param, value):
+    if value is not None and value not in VALID_PLATFORMS:
+        raise click.BadParameter(f"must be one of: {', '.join(VALID_PLATFORMS)}")
+    return value
+
+
+def platform_option(fn):
+    """Decorator adding --platform/-p to a command."""
+    return click.option(
+        "--platform", "-p", default=None, callback=_validate_platform,
+        expose_value=True, is_eager=False,
+        help="Filter by platform (imessage, telegram).",
+    )(fn)
 
 
 def _format_message(m: dict, full: bool) -> str:
@@ -117,68 +145,54 @@ def chats():
 
 @chats.command("recent")
 @click.option("--limit", default=20, help="Number of chats to show.")
-def chats_recent(limit: int):
+@platform_option
+def chats_recent(limit: int, platform: str | None):
     """List recent chats."""
-    rows = db.recent_chats(limit)
+    rows = backends.recent_chats(limit, platform)
     if not rows:
         click.echo("No chats found.")
         return
-    # Resolve identifiers to human-readable names
-    handles = [r["chat_identifier"] for r in rows if not r["display_name"] and not r["chat_identifier"].startswith("chat")]
-    name_cache = db._build_contact_cache(handles)
-    display = []
+    show_tags = platform is None
+    name_width = max(len(r["name"]) for r in rows)
     for r in rows:
-        cid = r["chat_identifier"]
-        fmt_cid = _format_phone(cid)
-        if r["display_name"]:
-            name = r["display_name"]
-        elif cid.startswith("chat"):
-            participants = db._get_chat_participants(db._connect_messages(), cid)
-            name = ", ".join(_format_phone(p) for p in participants[:3]) if participants else fmt_cid
-            if len(participants) > 3:
-                name += f" +{len(participants) - 3}"
-        else:
-            name = name_cache.get(cid, "") or fmt_cid
-        display.append((name, fmt_cid, r["last_msg"]))
-    name_width = max(len(d[0]) for d in display)
-    for name, cid, last_msg in display:
-        name_col = click.style(name.ljust(name_width), bold=True)
-        ts_col = click.style(last_msg, fg=DIM)
-        # Show phone number as extra context, but not raw chat IDs
-        show_id = name != cid and not cid.startswith("chat")
-        extra = f"  {click.style(cid, fg=DIM)}" if show_id else ""
+        name_col = click.style(r["name"].ljust(name_width), bold=True)
+        ts_col = click.style(r["last_message"], fg=DIM)
+        extras = []
+        if show_tags:
+            extras.append(_platform_tag(r["platform"]))
+        if r["username"]:
+            extras.append(click.style(f"@{r['username']}", fg=DIM))
+        if r["phone"] and r["name"] != r["phone"]:
+            extras.append(click.style(r["phone"], fg=DIM))
+        extra = "  ".join(extras)
+        if extra:
+            extra = "  " + extra
         click.echo(f"{name_col}  {ts_col}{extra}")
 
 
 @chats.command("find")
-@click.argument("identifier")
-def chats_find(identifier: str):
-    """Find DM/group chats for a phone number or name."""
-    rows = db.find_chats(identifier)
+@click.argument("query")
+@platform_option
+def chats_find(query: str, platform: str | None):
+    """Find chats by name, phone, or username."""
+    rows = backends.find_chats(query, platform)
     if not rows:
         click.echo("No chats found.")
         return
-    handles = [r["chat_identifier"] for r in rows if not r["display_name"] and not r["chat_identifier"].startswith("chat")]
-    name_cache = db._build_contact_cache(handles)
-    display = []
+    show_tags = platform is None
+    name_width = max(len(r["name"]) for r in rows)
     for r in rows:
-        cid = r["chat_identifier"]
-        fmt_cid = _format_phone(cid)
-        if r["display_name"]:
-            name = r["display_name"]
-        elif cid.startswith("chat"):
-            participants = db._get_chat_participants(db._connect_messages(), cid)
-            name = ", ".join(_format_phone(p) for p in participants[:3]) if participants else fmt_cid
-            if len(participants) > 3:
-                name += f" +{len(participants) - 3}"
-        else:
-            name = name_cache.get(cid, "") or fmt_cid
-        display.append((name, fmt_cid))
-    name_width = max(len(d[0]) for d in display)
-    for name, cid in display:
-        name_col = click.style(name.ljust(name_width), bold=True)
-        show_id = name != cid and not cid.startswith("chat")
-        extra = f"  {click.style(cid, fg=DIM)}" if show_id else ""
+        name_col = click.style(r["name"].ljust(name_width), bold=True)
+        extras = []
+        if show_tags:
+            extras.append(_platform_tag(r["platform"]))
+        if r["username"]:
+            extras.append(click.style(f"@{r['username']}", fg=DIM))
+        if r["phone"] and r["name"] != r["phone"]:
+            extras.append(click.style(r["phone"], fg=DIM))
+        extra = "  ".join(extras)
+        if extra:
+            extra = "  " + extra
         click.echo(f"{name_col}{extra}")
 
 
@@ -186,13 +200,13 @@ def chats_find(identifier: str):
 
 
 @cli.command("read")
-@click.argument("chat_id")
+@click.argument("identifier")
 @click.option("--limit", default=20, help="Number of messages to show.")
 @click.option("--full", is_flag=True, help="Show full message text without truncation.")
-def read_cmd(chat_id: str, limit: int, full: bool):
-    """Read messages from a chat."""
-    chat_id = db.resolve_identifier(chat_id)
-    messages = db.read_messages(chat_id, limit)
+@platform_option
+def read_cmd(identifier: str, limit: int, full: bool, platform: str | None):
+    """Read messages from a chat. Accepts names, phones, or chat IDs."""
+    messages = backends.read_messages(identifier, limit, platform)
     if not messages:
         click.echo("No messages found.")
         return
@@ -207,31 +221,34 @@ def read_cmd(chat_id: str, limit: int, full: bool):
 @click.argument("query")
 @click.option("--limit", default=20, help="Number of results to show.")
 @click.option("--full", is_flag=True, help="Show full message text without truncation.")
-def search_cmd(query: str, limit: int, full: bool):
-    """Search message content."""
-    results = db.search_messages(query, limit)
+@platform_option
+def search_cmd(query: str, limit: int, full: bool, platform: str | None):
+    """Search message content across platforms."""
+    results = backends.search_messages(query, limit, platform)
     if not results:
         click.echo("No messages found.")
         return
+    show_tags = platform is None
     for r in results:
         ts = click.style(r["timestamp"], fg=DIM)
-        chat = click.style(r["display_name"] or _format_phone(r["chat_identifier"]), fg=SENDER_OTHER)
+        chat = click.style(r["chat_name"], fg=SENDER_OTHER)
         sender_text = r["sender"] if r["sender"] == "Me" else _format_phone(r["sender"])
         sender = click.style(sender_text, fg=SENDER_ME if r["sender"] == "Me" else SENDER_OTHER)
         text = _truncate(r["text"], full)
-        click.echo(f"{ts}  {chat}  {sender}  {text}")
+        tag = f"  {_platform_tag(r['platform'])}" if show_tags else ""
+        click.echo(f"{ts}  {chat}  {sender}  {text}{tag}")
 
 
 # --- send ---
 
 
 @cli.command("send")
-@click.argument("phone")
+@click.argument("recipient")
 @click.argument("message")
 @click.option("--confirm", is_flag=True, help="Actually send (required).")
-def send_cmd(phone: str, message: str, confirm: bool):
+def send_cmd(recipient: str, message: str, confirm: bool):
     """Send an iMessage. Requires --confirm flag."""
-    phone = db.resolve_identifier(phone)
+    phone = db.resolve_identifier(recipient)
     if not confirm:
         click.echo(f"Would send to {click.style(_format_phone(phone), fg=SENDER_OTHER)}: {message}")
         click.echo(f"Pass {click.style('--confirm', bold=True)} to actually send.")
@@ -240,117 +257,17 @@ def send_cmd(phone: str, message: str, confirm: bool):
     click.echo(result)
 
 
-# ---------------------------------------------------------------------------
-# Telegram commands
-# ---------------------------------------------------------------------------
+# --- stats ---
 
 
-@cli.group("telegram")
-def telegram():
-    """Telegram commands."""
-
-
-@telegram.command("chats")
-@click.option("--limit", default=20, help="Number of chats to show.")
-def telegram_chats(limit: int):
-    """List recent Telegram chats."""
-    from .telegram_db import TelegramDB
-
-    tdb = TelegramDB()
-    try:
-        chats = tdb.recent_chats(limit)
-        if not chats:
-            click.echo("No chats found.")
-            return
-        name_width = max(len(c["name"]) for c in chats)
-        for c in chats:
-            name_col = click.style(c["name"].ljust(name_width), bold=True)
-            ts_col = click.style(c["last_message"], fg=DIM)
-            extra = ""
-            if c["username"]:
-                extra = f"  {click.style('@' + c['username'], fg=DIM)}"
-            peer = click.style(str(c["peer_id"]), fg=DIM)
-            click.echo(f"{name_col}  {ts_col}{extra}  {peer}")
-    finally:
-        tdb.close()
-
-
-@telegram.command("find")
-@click.argument("query")
-def telegram_find(query: str):
-    """Find Telegram chats by name or username."""
-    from .telegram_db import TelegramDB
-
-    tdb = TelegramDB()
-    try:
-        results = tdb.find_chats(query)
-        if not results:
-            click.echo("No chats found.")
-            return
-        for c in results:
-            name = click.style(c["name"], bold=True)
-            extra = f"  @{c['username']}" if c["username"] else ""
-            peer = click.style(str(c["peer_id"]), fg=DIM)
-            click.echo(f"{name}{extra}  {peer}")
-    finally:
-        tdb.close()
-
-
-@telegram.command("read")
-@click.argument("peer_id", type=int)
-@click.option("--limit", default=20, help="Number of messages to show.")
-@click.option("--full", is_flag=True, help="Show full message text.")
-def telegram_read(peer_id: int, limit: int, full: bool):
-    """Read messages from a Telegram chat by peer ID."""
-    from .telegram_db import TelegramDB
-
-    tdb = TelegramDB()
-    try:
-        messages = tdb.read_messages(peer_id, limit)
-        if not messages:
-            click.echo("No messages found.")
-            return
-        for m in reversed(messages):
-            click.echo(_format_message(m, full))
-    finally:
-        tdb.close()
-
-
-@telegram.command("search")
-@click.argument("query")
-@click.option("--limit", default=20, help="Number of results.")
-@click.option("--full", is_flag=True, help="Show full message text.")
-def telegram_search(query: str, limit: int, full: bool):
-    """Search Telegram messages."""
-    from .telegram_db import TelegramDB
-
-    tdb = TelegramDB()
-    try:
-        results = tdb.search_messages(query, limit)
-        if not results:
-            click.echo("No messages found.")
-            return
-        for r in results:
-            ts = click.style(r["timestamp"], fg=DIM)
-            chat = click.style(r["chat_name"], fg=SENDER_OTHER)
-            sender_text = r["sender"]
-            is_me = sender_text == "Me"
-            sender = click.style(sender_text, fg=SENDER_ME if is_me else SENDER_OTHER)
-            text = _truncate(r["text"], full)
-            click.echo(f"{ts}  {chat}  {sender}  {text}")
-    finally:
-        tdb.close()
-
-
-@telegram.command("stats")
-def telegram_stats():
-    """Show Telegram database statistics."""
-    from .telegram_db import TelegramDB
-
-    tdb = TelegramDB()
-    try:
-        s = tdb.stats()
-        click.echo(f"Messages: {s['messages']}")
-        click.echo(f"Peers: {s['peers']}")
-    finally:
-        tdb.close()
+@cli.command("stats")
+@platform_option
+def stats_cmd(platform: str | None):
+    """Show message database statistics."""
+    rows = backends.stats(platform)
+    if not rows:
+        click.echo("No platforms available.")
+        return
+    for r in rows:
+        label = click.style(r["platform"], bold=True)
+        click.echo(f"{label}  Messages: {r['messages']:,}  Chats: {r['chats']:,}")
