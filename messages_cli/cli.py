@@ -246,14 +246,18 @@ def search_cmd(query: str, limit: int, full: bool, platform: str | None):
 @click.argument("recipient")
 @click.argument("message")
 @click.option("--confirm", is_flag=True, help="Actually send (required).")
-def send_cmd(recipient: str, message: str, confirm: bool):
-    """Send an iMessage. Requires --confirm flag."""
-    phone = db.resolve_identifier(recipient)
+@platform_option
+def send_cmd(recipient: str, message: str, confirm: bool, platform: str | None):
+    """Send a message. Requires --confirm flag."""
     if not confirm:
-        click.echo(f"Would send to {click.style(_format_phone(phone), fg=SENDER_OTHER)}: {message}")
+        plat, display = backends.resolve_send_target(recipient, platform)
+        tag = _platform_tag(plat)
+        if plat == "messages":
+            display = _format_phone(display)
+        click.echo(f"Would send {tag} to {click.style(display, fg=SENDER_OTHER)}: {message}")
         click.echo(f"Pass {click.style('--confirm', bold=True)} to actually send.")
         return
-    result = send.send_message(phone, message)
+    plat, result = backends.send_message(recipient, message, platform)
     click.echo(result)
 
 
