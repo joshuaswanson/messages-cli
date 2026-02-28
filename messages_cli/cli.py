@@ -1,5 +1,6 @@
 """CLI entry point for messages-cli."""
 
+import phonenumbers
 import click
 
 from . import db, send
@@ -11,6 +12,17 @@ SENDER_OTHER = "cyan"
 EDITED = "yellow"
 REACTION = "magenta"
 ATTACHMENT = "yellow"
+
+
+def _format_phone(value: str) -> str:
+    """Format a phone number nicely based on country code."""
+    try:
+        parsed = phonenumbers.parse(value)
+        return phonenumbers.format_number(
+            parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL
+        )
+    except phonenumbers.NumberParseException:
+        return value
 
 
 def _truncate(text: str, full: bool) -> str:
@@ -27,7 +39,8 @@ def _truncate(text: str, full: bool) -> str:
 def _format_message(m: dict, full: bool) -> str:
     ts = click.style(m["timestamp"], fg=DIM)
     is_me = m["sender"] == "Me"
-    sender = click.style(m["sender"], fg=SENDER_ME if is_me else SENDER_OTHER)
+    sender_text = m["sender"] if is_me else _format_phone(m["sender"])
+    sender = click.style(sender_text, fg=SENDER_ME if is_me else SENDER_OTHER)
     if m["edited"]:
         sender += click.style(" [edited]", fg=EDITED)
 
@@ -89,7 +102,7 @@ def contacts_search(name: str):
         name_str = click.style(f"{first} {last}".strip(), bold=True)
         click.echo(name_str)
         for phone in c["phones"]:
-            click.echo(f"  {click.style('phone:', fg=DIM)} {phone}")
+            click.echo(f"  {click.style('phone:', fg=DIM)} {_format_phone(phone)}")
         for email in c["emails"]:
             click.echo(f"  {click.style('email:', fg=DIM)} {email}")
 
@@ -116,16 +129,17 @@ def chats_recent(limit: int):
     display = []
     for r in rows:
         cid = r["chat_identifier"]
+        fmt_cid = _format_phone(cid)
         if r["display_name"]:
             name = r["display_name"]
         elif cid.startswith("chat"):
             participants = db._get_chat_participants(db._connect_messages(), cid)
-            name = ", ".join(participants[:3]) if participants else cid
+            name = ", ".join(_format_phone(p) for p in participants[:3]) if participants else fmt_cid
             if len(participants) > 3:
                 name += f" +{len(participants) - 3}"
         else:
-            name = name_cache.get(cid, "") or cid
-        display.append((name, cid, r["last_msg"]))
+            name = name_cache.get(cid, "") or fmt_cid
+        display.append((name, fmt_cid, r["last_msg"]))
     name_width = max(len(d[0]) for d in display)
     for name, cid, last_msg in display:
         name_col = click.style(name.ljust(name_width), bold=True)
@@ -149,16 +163,17 @@ def chats_find(identifier: str):
     display = []
     for r in rows:
         cid = r["chat_identifier"]
+        fmt_cid = _format_phone(cid)
         if r["display_name"]:
             name = r["display_name"]
         elif cid.startswith("chat"):
             participants = db._get_chat_participants(db._connect_messages(), cid)
-            name = ", ".join(participants[:3]) if participants else cid
+            name = ", ".join(_format_phone(p) for p in participants[:3]) if participants else fmt_cid
             if len(participants) > 3:
                 name += f" +{len(participants) - 3}"
         else:
-            name = name_cache.get(cid, "") or cid
-        display.append((name, cid))
+            name = name_cache.get(cid, "") or fmt_cid
+        display.append((name, fmt_cid))
     name_width = max(len(d[0]) for d in display)
     for name, cid in display:
         name_col = click.style(name.ljust(name_width), bold=True)
@@ -200,8 +215,9 @@ def search_cmd(query: str, limit: int, full: bool):
         return
     for r in results:
         ts = click.style(r["timestamp"], fg=DIM)
-        chat = click.style(r["display_name"] or r["chat_identifier"], fg=SENDER_OTHER)
-        sender = click.style(r["sender"], fg=SENDER_ME if r["sender"] == "Me" else SENDER_OTHER)
+        chat = click.style(r["display_name"] or _format_phone(r["chat_identifier"]), fg=SENDER_OTHER)
+        sender_text = r["sender"] if r["sender"] == "Me" else _format_phone(r["sender"])
+        sender = click.style(sender_text, fg=SENDER_ME if r["sender"] == "Me" else SENDER_OTHER)
         text = _truncate(r["text"], full)
         click.echo(f"{ts}  {chat}  {sender}  {text}")
 
@@ -217,7 +233,7 @@ def send_cmd(phone: str, message: str, confirm: bool):
     """Send an iMessage. Requires --confirm flag."""
     phone = db.resolve_identifier(phone)
     if not confirm:
-        click.echo(f"Would send to {click.style(phone, fg=SENDER_OTHER)}: {message}")
+        click.echo(f"Would send to {click.style(_format_phone(phone), fg=SENDER_OTHER)}: {message}")
         click.echo(f"Pass {click.style('--confirm', bold=True)} to actually send.")
         return
     result = send.send_message(phone, message)
