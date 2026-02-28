@@ -1,8 +1,16 @@
 # messages-cli
 
-CLI for reading, searching, and sending iMessages on macOS.
+CLI for reading and searching local message databases (iMessage, Telegram, WhatsApp) on macOS.
 
-Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly and sends messages via AppleScript. Anywhere a phone number is accepted, you can use a contact name instead. Shows reactions, attachments, and resolves sender phone numbers to contact names. Phone numbers are formatted with proper spacing based on country code (e.g. `+1 206-555-1234`, `+41 79 123 45 67`). Output is colorized with truncation for long messages.
+## Platforms
+
+**iMessage** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly and sends messages via AppleScript. Anywhere a phone number is accepted, you can use a contact name instead. Shows reactions, attachments, and resolves sender phone numbers to contact names. Phone numbers are formatted with proper spacing based on country code (e.g. `+1 206-555-1234`, `+41 79 123 45 67`).
+
+**Telegram** -- Decrypts and reads the local Telegram database (SQLCipher-encrypted postbox). Supports listing chats, reading messages, and searching. Requires `sqlcipher` CLI (`brew install sqlcipher`).
+
+**WhatsApp** -- Coming soon.
+
+Output is colorized with truncation for long messages.
 
 ## Install
 
@@ -87,6 +95,50 @@ $ messages send "+1 415-555-9876" "On my way!" --confirm
 Message sent.
 ```
 
+### Telegram
+
+#### List recent Telegram chats
+
+```bash
+$ messages telegram chats --limit 3
+Alice Johnson    2026-02-28 14:30:12  @alicej    12345678
+Family Group     2026-02-27 09:15:43             87654321
+Bob Williams     2026-02-26 20:00:01  @bobw      11223344
+```
+
+#### Find Telegram chats
+
+```bash
+$ messages telegram find "Alice"
+Alice Johnson  @alicej  12345678
+```
+
+#### Read Telegram messages
+
+```bash
+$ messages telegram read 12345678 --limit 3
+2026-02-27 08:10:00  Alice Johnson  Did you see the news?
+2026-02-27 08:12:30  Me             Yeah, wild
+2026-02-27 09:15:43  Alice Johnson  Right??
+```
+
+#### Search Telegram messages
+
+```bash
+$ messages telegram search "dinner" --limit 3
+2026-02-27 18:30:00  Alice Johnson   Me             Dinner at 7?
+2026-02-26 12:15:00  Family Group    Bob Williams   Dinner plans?
+```
+
+#### Telegram stats
+
+```bash
+$ messages telegram stats
+Messages: 28529
+Peers: 207
+```
+
 ## Requirements
 
-Your terminal app must have **Full Disk Access** granted in System Settings > Privacy & Security > Full Disk Access. Without this, the Messages database cannot be read.
+- **Full Disk Access**: Your terminal app must have Full Disk Access granted in System Settings > Privacy & Security > Full Disk Access. Required for reading the iMessage and Telegram databases.
+- **sqlcipher** (for Telegram): `brew install sqlcipher`. Required to decrypt the Telegram database.
