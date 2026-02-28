@@ -6,11 +6,12 @@ Each function accepts an optional platform filter; None means query all availabl
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import re
 from pathlib import Path
 
-from . import db
+from . import db, send, telegram_send
 
 # Telegram container path (same as telegram_db.py)
 _TG_CONTAINER = Path.home() / "Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
@@ -276,3 +277,125 @@ def stats(platform: str | None = None) -> list[dict]:
         })
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Send
+# ---------------------------------------------------------------------------
+
+def send_message(
+    identifier: str, text: str, platform: str | None = None
+) -> tuple[str, str]:
+    """Resolve identifier and send a message.
+
+    Returns (platform_used, result_string).
+    If platform is None, auto-detects (errors if ambiguous).
+    """
+    if platform == "messages":
+        phone = db.resolve_identifier(identifier)
+        result = send.send_message(phone, text)
+        return "messages", result
+
+    if platform == "telegram":
+        if not telegram_send.is_available():
+            raise SystemExit(
+                "No Telegram auth keys found. Is Telegram installed and logged in?"
+            )
+        tdb = _get_telegram_db()
+        peer_id = tdb.resolve_identifier(identifier)
+        if peer_id is None:
+            raise SystemExit(f'Could not find Telegram chat for "{identifier}".')
+        result = asyncio.run(telegram_send.send_message(peer_id, text))
+        return "telegram", result
+
+    # Auto-detect
+    im_phone = None
+    tg_peer_id = None
+
+    if "messages" in available_platforms():
+        resolved = db.resolve_identifier(identifier)
+        if resolved != identifier:
+            im_phone = resolved
+        else:
+            chats = db.find_chats(identifier)
+            if chats:
+                im_phone = resolved
+
+    if "telegram" in available_platforms() and telegram_send.is_available():
+        tdb = _get_telegram_db()
+        tg_peer_id = tdb.resolve_identifier(identifier)
+
+    if im_phone and tg_peer_id:
+        raise SystemExit(
+            f'Found "{identifier}" on both Messages and Telegram. '
+            "Use --platform/-p to specify which one."
+        )
+
+    if im_phone:
+        result = send.send_message(im_phone, text)
+        return "messages", result
+
+    if tg_peer_id:
+        result = asyncio.run(telegram_send.send_message(tg_peer_id, text))
+        return "telegram", result
+
+    raise SystemExit(f'Could not find "{identifier}" on any platform.')
+
+
+def resolve_send_target(
+    identifier: str, platform: str | None = None
+) -> tuple[str, str]:
+    """Resolve identifier for send preview (no actual send).
+
+    Returns (platform_name, display_name) for dry-run output.
+    """
+    if platform == "messages":
+        phone = db.resolve_identifier(identifier)
+        return "messages", phone
+
+    if platform == "telegram":
+        if not telegram_send.is_available():
+            raise SystemExit(
+                "No Telegram auth keys found. Is Telegram installed and logged in?"
+            )
+        tdb = _get_telegram_db()
+        peer_id = tdb.resolve_identifier(identifier)
+        if peer_id is None:
+            raise SystemExit(f'Could not find Telegram chat for "{identifier}".')
+        peer = tdb._get_peer(peer_id)
+        from .telegram_db import _peer_display_name
+        return "telegram", _peer_display_name(peer)
+
+    # Auto-detect
+    im_phone = None
+    tg_peer_id = None
+
+    if "messages" in available_platforms():
+        resolved = db.resolve_identifier(identifier)
+        if resolved != identifier:
+            im_phone = resolved
+        else:
+            chats = db.find_chats(identifier)
+            if chats:
+                im_phone = resolved
+
+    if "telegram" in available_platforms() and telegram_send.is_available():
+        tdb = _get_telegram_db()
+        tg_peer_id = tdb.resolve_identifier(identifier)
+
+    if im_phone and tg_peer_id:
+        raise SystemExit(
+            f'Found "{identifier}" on both Messages and Telegram. '
+            "Use --platform/-p to specify which one."
+        )
+
+    if im_phone:
+        return "messages", im_phone
+
+    if tg_peer_id:
+        tdb = _get_telegram_db()
+        peer = tdb._get_peer(tg_peer_id)
+        from .telegram_db import _peer_display_name
+        return "telegram", _peer_display_name(peer)
+
+    raise SystemExit(f'Could not find "{identifier}" on any platform.')

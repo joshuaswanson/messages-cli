@@ -1,14 +1,12 @@
 # messages-cli
 
-A unified CLI for reading, searching, and sending messages across all your messaging apps from the terminal. Supports iMessage, SMS/RCS, and Telegram on macOS.
+Read, search, and send messages across iMessage, SMS/RCS, and Telegram from the terminal. macOS only.
 
 ## Platforms
 
-**Messages** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly and sends messages via AppleScript. Covers iMessage (blue bubbles) and SMS/RCS (green bubbles). Anywhere a phone number is accepted, you can use a contact name instead. Shows reactions, attachments, and resolves sender phone numbers to contact names. Phone numbers are formatted with proper spacing based on country code (e.g. `+1 206-555-1234`, `+41 79 123 45 67`).
-
-**Telegram** -- Decrypts and reads the local Telegram database (SQLCipher-encrypted postbox). Supports listing chats, reading messages, and searching. Requires `sqlcipher` CLI (`brew install sqlcipher`).
-
-**WhatsApp** -- Coming soon.
+- **Messages** -- iMessage and SMS/RCS (blue and green bubbles)
+- **Telegram** -- Full support including sending (piggybacks on your Telegram.app session)
+- **WhatsApp** -- Coming soon
 
 All commands work across platforms by default. Use `--platform/-p` to filter by a specific platform (`messages` or `telegram`). Platform tags `[ms]`/`[tg]` appear in merged output.
 
@@ -21,16 +19,6 @@ uv run messages --help
 ```
 
 ## Usage
-
-### Search contacts
-
-```bash
-$ messages contacts search "John"
-John Smith
-  phone: +1 206 555 1234
-  phone: +41 78 555 6789
-  email: john.smith@gmail.com
-```
 
 ### List recent chats
 
@@ -47,8 +35,6 @@ Family Group     2026-02-27 09:15:43
 Bob Williams     2026-02-26 20:00:01  @bobw
 ```
 
-Phone numbers, group chat participants, and Telegram usernames are resolved automatically. Platform tags only appear in merged (cross-platform) mode.
-
 ### Find chats
 
 ```bash
@@ -62,7 +48,7 @@ Book Club   [ms]
 
 ### Read messages
 
-Accepts contact names, group chat names, phone numbers, Telegram usernames, or raw chat/peer IDs. Auto-detects the platform unless `--platform` is specified.
+Accepts contact names, group chat names, phone numbers, or Telegram usernames. Auto-detects the platform unless `--platform` is specified.
 
 ```bash
 $ messages read "Sarah" --limit 3
@@ -70,14 +56,10 @@ $ messages read "Sarah" --limit 3
 2026-02-27 08:12:30  Me          No worries, I'll grab us a table
 2026-02-27 09:15:43  Sarah Chen  Thanks for breakfast! [image: IMG_2041.heic]
 
-$ messages read "+41 79 123 45 67" --limit 3   # phone numbers work for both platforms
+$ messages read "+41 79 123 45 67" --limit 3
 2026-02-27 08:10:00  Alice Johnson  Did you see the news?
 2026-02-27 08:12:30  Me             Yeah, wild
 2026-02-27 09:15:43  Alice Johnson  Right??
-
-$ messages read "Book Club" --limit 1 --full
-2026-02-26 20:00:01  John Smith  Here's what I was thinking for the next meeting, we should probably try to
-coordinate schedules better. Maybe a poll would help?
 ```
 
 ### Search messages
@@ -87,22 +69,36 @@ $ messages search "dinner" --limit 3
 2026-02-27 18:30:00  +1 206-555-1234  Me          Dinner at 7?           [ms]
 2026-02-26 12:15:00  Family Group     Bob Williams Dinner plans?          [tg]
 2026-02-25 09:00:00  +1 415-555-9876  Sarah Chen  Thanks for dinner!     [ms]
-
-$ messages search "dinner" --platform telegram --limit 3
-2026-02-26 12:15:00  Family Group  Bob Williams  Dinner plans?
 ```
 
 ### Send a message
 
-Sends via iMessage. Accepts contact names, group chat names, or phone numbers.
+Dry-run by default. Pass `--confirm` to actually send.
 
 ```bash
 $ messages send "Sarah" "Hey, are we still on for tomorrow?"
-Would send to +1 415-555-9876: Hey, are we still on for tomorrow?
+Would send [ms] to +1 415-555-9876: Hey, are we still on for tomorrow?
 Pass --confirm to actually send.
 
 $ messages send "+1 415-555-9876" "On my way!" --confirm
 Message sent.
+
+$ messages send "Alice" "See you at 3" -p telegram
+Would send [tg] to Alice Johnson: See you at 3
+Pass --confirm to actually send.
+
+$ messages send "Alice" "See you at 3" -p telegram --confirm
+Message sent.
+```
+
+### Search contacts
+
+```bash
+$ messages contacts search "John"
+John Smith
+  phone: +1 206 555 1234
+  phone: +41 78 555 6789
+  email: john.smith@gmail.com
 ```
 
 ### Statistics
@@ -111,12 +107,15 @@ Message sent.
 $ messages stats
 messages   Messages: 48,291  Chats: 142
 telegram   Messages: 28,529  Chats: 207
-
-$ messages stats --platform telegram
-telegram   Messages: 28,529  Chats: 207
 ```
 
 ## Requirements
 
-- **Full Disk Access**: Your terminal app must have Full Disk Access granted in System Settings > Privacy & Security > Full Disk Access. Required for reading the iMessage and Telegram databases.
-- **sqlcipher** (for Telegram): `brew install sqlcipher`. Required to decrypt the Telegram database.
+- **Full Disk Access** -- Grant your terminal app Full Disk Access in System Settings > Privacy & Security. Required for reading the iMessage and Telegram databases.
+- **sqlcipher** -- `brew install sqlcipher`. Required for Telegram support.
+
+## How it works
+
+**Messages** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly for reading. Sends via AppleScript. Resolves phone numbers to contact names, shows reactions and attachments, formats phone numbers by country code.
+
+**Telegram** -- Decrypts the local Telegram database (SQLCipher-encrypted postbox) for reading. For sending, it extracts the persistent MTProto auth key from the local database and uses Telethon to make API calls -- no separate login needed, it piggybacks on your existing Telegram.app session.
