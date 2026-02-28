@@ -2,7 +2,7 @@
 
 CLI for reading, searching, and sending iMessages on macOS.
 
-Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly and sends messages via AppleScript. Anywhere a phone number is accepted, you can use a contact name instead. Shows reactions, attachments, and resolves sender phone numbers to contact names. Output is colorized with truncation for long messages.
+Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly and sends messages via AppleScript. Anywhere a phone number is accepted, you can use a contact name instead. Shows reactions, attachments, and resolves sender phone numbers to contact names. Phone numbers are formatted with proper spacing based on country code (e.g. `+1 206-555-1234`, `+41 79 123 45 67`). Output is colorized with truncation for long messages.
 
 ## Install
 
@@ -28,8 +28,8 @@ John Smith
 
 ```bash
 $ messages chats recent --limit 4
-John Smith                    2026-02-28 14:30:12  +12065551234
-Sarah Chen                    2026-02-27 09:15:43  +14155559876
+John Smith                    2026-02-28 14:30:12  +1 206-555-1234
+Sarah Chen                    2026-02-27 09:15:43  +1 415-555-9876
 Book Club                     2026-02-26 20:00:01
 John Smith, Sarah Chen, Alex  2026-02-25 18:00:00
 ```
@@ -40,7 +40,7 @@ Phone numbers and group chat participants are resolved to contact names automati
 
 ```bash
 $ messages chats find "John"
-John Smith                     +12065551234
+John Smith                     +1 206-555-1234
 Book Club
 John Smith, Sarah Chen, Alex
 ```
@@ -66,16 +66,18 @@ coordinate schedules better. Maybe a poll would help?
 
 ```bash
 $ messages search "dinner" --limit 3
-2026-02-27 18:30:00  +12065551234  Me          Dinner at 7?
-2026-02-26 12:15:00  Book Club     John Smith  Dinner after the meetup?
-2026-02-25 09:00:00  +14155559876  Sarah Chen  Thanks for dinner last night!
+2026-02-27 18:30:00  +1 206-555-1234  Me          Dinner at 7?
+2026-02-26 12:15:00  Book Club        John Smith  Dinner after the meetup?
+2026-02-25 09:00:00  +1 415-555-9876  Sarah Chen  Thanks for dinner last night!
 ```
 
 ### Send a message
 
+Works with contact names, group chat names, or phone numbers.
+
 ```bash
 $ messages send "John" "Hey, are we still on for tomorrow?"
-Would send to +12065551234: Hey, are we still on for tomorrow?
+Would send to +1 206-555-1234: Hey, are we still on for tomorrow?
 Pass --confirm to actually send.
 
 $ messages send "John" "Hey, are we still on for tomorrow?" --confirm
