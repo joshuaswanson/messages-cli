@@ -50,15 +50,18 @@ John Smith, Sarah Chen, Alex
 Accepts contact names, group chat names, phone numbers, or chat IDs. Long messages are truncated to one line by default.
 
 ```bash
-$ messages read "Book Club" --limit 5
-2026-02-26 19:55:00  John Smith   Has everyone finished the book?
-2026-02-26 19:56:12  Sarah Chen   Almost done!
-2026-02-26 19:57:30  Me           Just started chapter 10 [image: IMG_4521.png]
-2026-02-26 19:58:01  Sarah Chen   [Loved] "Just started chapter 10"
-2026-02-26 20:00:01  John Smith   Here's what I was thinking for the next meeting, we should probably try to... [...]
+$ messages read "Sarah" --limit 3
+2026-02-27 08:10:00  Sarah Chen  Running 5 min late
+2026-02-27 08:12:30  Me          No worries, I'll grab us a table
+2026-02-27 09:15:43  Sarah Chen  Thanks for breakfast! [image: IMG_2041.heic]
+
+$ messages read "+1 415-555-9876" --limit 3   # phone numbers work too
+2026-02-27 08:10:00  Sarah Chen  Running 5 min late
+2026-02-27 08:12:30  Me          No worries, I'll grab us a table
+2026-02-27 09:15:43  Sarah Chen  Thanks for breakfast! [image: IMG_2041.heic]
 
 $ messages read "Book Club" --limit 1 --full  # show full message text
-2026-02-26 20:00:01  John Smith   Here's what I was thinking for the next meeting, we should probably try to
+2026-02-26 20:00:01  John Smith  Here's what I was thinking for the next meeting, we should probably try to
 coordinate schedules better. Maybe a poll would help?
 ```
 
@@ -80,7 +83,7 @@ $ messages send "Sarah" "Hey, are we still on for tomorrow?"
 Would send to +1 415-555-9876: Hey, are we still on for tomorrow?
 Pass --confirm to actually send.
 
-$ messages send "Sarah" "Hey, are we still on for tomorrow?" --confirm
+$ messages send "+1 415-555-9876" "On my way!" --confirm
 Message sent.
 ```
 
