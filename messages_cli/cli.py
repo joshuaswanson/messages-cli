@@ -110,16 +110,30 @@ def chats_recent(limit: int):
     if not rows:
         click.echo("No chats found.")
         return
-    # Calculate column widths
-    ids = [r["chat_identifier"] for r in rows]
-    names = [r["display_name"] or "" for r in rows]
-    id_width = max(len(i) for i in ids)
-    name_width = max((len(n) for n in names if n), default=0)
-    for r, cid, name in zip(rows, ids, names):
-        id_col = click.style(cid.ljust(id_width), fg=SENDER_OTHER)
-        name_col = click.style(name.ljust(name_width), bold=True) + "  " if name else " " * (name_width + 2) if name_width else ""
-        ts_col = click.style(r["last_msg"], fg=DIM)
-        click.echo(f"{id_col}  {name_col}{ts_col}")
+    # Resolve identifiers to human-readable names
+    handles = [r["chat_identifier"] for r in rows if not r["display_name"] and not r["chat_identifier"].startswith("chat")]
+    name_cache = db._build_contact_cache(handles)
+    display = []
+    for r in rows:
+        cid = r["chat_identifier"]
+        if r["display_name"]:
+            name = r["display_name"]
+        elif cid.startswith("chat"):
+            participants = db._get_chat_participants(db._connect_messages(), cid)
+            name = ", ".join(participants[:3]) if participants else cid
+            if len(participants) > 3:
+                name += f" +{len(participants) - 3}"
+        else:
+            name = name_cache.get(cid, "") or cid
+        display.append((name, cid, r["last_msg"]))
+    name_width = max(len(d[0]) for d in display)
+    for name, cid, last_msg in display:
+        name_col = click.style(name.ljust(name_width), bold=True)
+        ts_col = click.style(last_msg, fg=DIM)
+        # Show phone number as extra context, but not raw chat IDs
+        show_id = name != cid and not cid.startswith("chat")
+        extra = f"  {click.style(cid, fg=DIM)}" if show_id else ""
+        click.echo(f"{name_col}  {ts_col}{extra}")
 
 
 @chats.command("find")
@@ -130,13 +144,27 @@ def chats_find(identifier: str):
     if not rows:
         click.echo("No chats found.")
         return
-    ids = [r["chat_identifier"] for r in rows]
-    id_width = max(len(i) for i in ids)
-    for r, cid in zip(rows, ids):
-        id_col = click.style(cid.ljust(id_width), fg=SENDER_OTHER)
-        name = r["display_name"] or ""
-        name_col = click.style(name, bold=True) if name else ""
-        click.echo(f"{id_col}  {name_col}")
+    handles = [r["chat_identifier"] for r in rows if not r["display_name"] and not r["chat_identifier"].startswith("chat")]
+    name_cache = db._build_contact_cache(handles)
+    display = []
+    for r in rows:
+        cid = r["chat_identifier"]
+        if r["display_name"]:
+            name = r["display_name"]
+        elif cid.startswith("chat"):
+            participants = db._get_chat_participants(db._connect_messages(), cid)
+            name = ", ".join(participants[:3]) if participants else cid
+            if len(participants) > 3:
+                name += f" +{len(participants) - 3}"
+        else:
+            name = name_cache.get(cid, "") or cid
+        display.append((name, cid))
+    name_width = max(len(d[0]) for d in display)
+    for name, cid in display:
+        name_col = click.style(name.ljust(name_width), bold=True)
+        show_id = name != cid and not cid.startswith("chat")
+        extra = f"  {click.style(cid, fg=DIM)}" if show_id else ""
+        click.echo(f"{name_col}{extra}")
 
 
 # --- read ---
