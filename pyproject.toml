@@ -1,7 +1,7 @@
 [project]
 name = "messages-cli"
 version = "0.2.0"
-description = "CLI for reading and searching local message databases (iMessage, Telegram, WhatsApp)"
+description = "Unified CLI for reading, searching, and sending messages across all your messaging apps"
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",
