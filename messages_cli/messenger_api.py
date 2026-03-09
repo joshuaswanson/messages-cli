@@ -439,6 +439,26 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
         if uid is not None and name:
             users[uid] = name
 
+    # Build attachment map: message_id -> list of attachment descriptions
+    attach_map: dict[str, list[str]] = {}
+    for args in all_calls.get("insertBlobAttachment", []):
+        if len(args) <= 32 or args[27] != tid:
+            continue
+        msg_id = args[32]
+        atype = args[29]  # 2=image, 4=video
+        fname = args[0] or ""
+        if atype == 4 or fname.startswith("video"):
+            attach_map.setdefault(msg_id, []).append("video")
+        else:
+            attach_map.setdefault(msg_id, []).append("image")
+
+    for args in all_calls.get("insertStickerAttachment", []):
+        if len(args) <= 18 or args[14] != tid:
+            continue
+        msg_id = args[18]
+        label = args[13] if len(args) > 13 and args[13] else "sticker"
+        attach_map.setdefault(msg_id, []).append(f"sticker: {label}")
+
     # Get messages for this thread
     messages = []
     seen_ids = set()
@@ -451,16 +471,19 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
         text = args[0]
         timestamp = args[5]
         author_id = args[10]
+        msg_id = args[8] if len(args) > 8 else None
+        attachments = attach_map.get(msg_id, []) if msg_id else []
         key = (timestamp, author_id, text)
         if key in seen_ids:
             continue
         seen_ids.add(key)
-        if not text:
+        if not text and not attachments:
             continue
         messages.append({
             "text": text,
             "timestamp": timestamp,
             "author_id": author_id,
+            "attachments": attachments,
         })
 
     # If we need more messages, use MQTT pagination via fb-fetch-tool
@@ -498,10 +521,13 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
             sender = "Me"
         else:
             sender = users.get(author_id, str(author_id) if author_id else "Unknown")
+        text = m["text"] or ""
+        for att in m.get("attachments", []):
+            text = f"{text} [{att}]" if text else f"[{att}]"
         results.append({
             "timestamp": _ts_to_datetime(m["timestamp"]),
             "sender": sender,
-            "text": m["text"],
+            "text": text,
         })
 
     return results
