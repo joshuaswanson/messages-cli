@@ -160,7 +160,7 @@ messenger   Messages: 1,204   Chats: 31
 
 **Messages** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly for reading. Sends via AppleScript. Resolves phone numbers to contact names, shows reactions and attachments, formats phone numbers by country code. Image attachments are returned as local file paths from `~/Library/Messages/Attachments/`.
 
-**Telegram** -- Decrypts the local Telegram database (SQLCipher-encrypted postbox) for reading. For sending, it extracts the persistent MTProto auth key from the local database and uses Telethon to make API calls, no separate login needed.
+**Telegram** -- Decrypts the local Telegram database (SQLCipher-encrypted postbox) for reading. For sending, it extracts the persistent MTProto auth key from the local database and uses Telethon to make API calls, no separate login needed. Image attachments are resolved from the local media cache by parsing photo resource IDs from the binary message format.
 
 **WhatsApp** -- Reads the WhatsApp Desktop SQLite databases (`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/`) directly. Resolves contact names from the contacts database and group member tables. For sending, uses a Go binary (whatsmeow) with a one-time QR code pairing flow. Image attachments are returned as local file paths from the WhatsApp media cache.
 

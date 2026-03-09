@@ -14,6 +14,7 @@ from __future__ import annotations
 import binascii
 import enum
 import io
+import os
 import sqlite3
 import struct
 import subprocess
@@ -443,7 +444,7 @@ def _parse_message_value(data: bytes) -> dict | None:
             reader.read_int64()
 
         flags = _MessageFlags(reader.read_uint32())
-        _tags = reader.read_uint32()
+        tags = reader.read_uint32()
 
         _fwd_info = _parse_fwd_info(reader)
 
@@ -454,13 +455,149 @@ def _parse_message_value(data: bytes) -> dict | None:
 
         text = reader.read_str()
 
+        # Capture position after text for media parsing
+        post_text_pos = reader.buf.tell()
+        post_text_data = reader.buf.read()
+        reader.buf.seek(post_text_pos)
+
         return {
             "text": text,
             "author_id": author_id,
             "incoming": bool(_MessageFlags.Incoming & flags),
+            "tags": tags,
+            "_post_text": post_text_data,
         }
     except (EOFError, struct.error):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Photo media extraction
+# ---------------------------------------------------------------------------
+
+_TG_MEDIA_IMAGE_HASH = 0x8bae2094
+
+
+def _extract_photo_resource_ids(post_text_data: bytes) -> list[int]:
+    """Extract photo resource IDs from the post-text portion of a message.
+
+    After text, the message binary contains:
+      - attributes: count(i32) + for_each(len(i32) + data)
+      - media: count(i32) + for_each(len(i32) + data)
+
+    For TelegramMediaImage objects, we parse representations to find
+    resource IDs that correspond to cached photo files on disk.
+    """
+    if len(post_text_data) < 8:
+        return []
+
+    reader = _ByteReader(post_text_data)
+    try:
+        # Skip attributes
+        attr_count = reader.read_int32()
+        for _ in range(attr_count):
+            alen = reader.read_int32()
+            reader.buf.read(alen)
+
+        # Read media
+        media_count = reader.read_int32()
+        if media_count == 0:
+            return []
+
+        resource_ids = []
+        for _ in range(media_count):
+            mlen = reader.read_int32()
+            media_data = reader.buf.read(mlen)
+            rids = _parse_media_image(media_data)
+            resource_ids.extend(rids)
+
+        return resource_ids
+    except (EOFError, struct.error, ValueError):
+        return []
+
+
+def _parse_media_image(media_data: bytes) -> list[int]:
+    """Parse a media blob and extract resource IDs if it's a TelegramMediaImage."""
+    try:
+        mr = _ByteReader(media_data)
+        klen = mr.read_uint8()
+        mr.buf.read(klen)  # key (usually "_")
+        vtype = mr.read_uint8()
+        if vtype != _ValueType.Object.value:
+            return []
+        type_hash = mr.read_int32() & 0xffffffff
+        if type_hash != _TG_MEDIA_IMAGE_HASH:
+            return []
+        inner_len = mr.read_int32()
+        inner_data = mr.buf.read(inner_len)
+
+        inner = _PostboxDecoder(inner_data)
+        fields = inner.decode_all_fields()
+        reps = fields.get('r', [])
+        if not isinstance(reps, list):
+            return []
+
+        resource_ids = []
+        for rep_bytes in reps:
+            if not isinstance(rep_bytes, bytes):
+                continue
+            rid = _extract_resource_id_from_rep(rep_bytes)
+            if rid is not None:
+                resource_ids.append(rid)
+        return resource_ids
+    except (EOFError, struct.error, ValueError):
+        return []
+
+
+def _extract_resource_id_from_rep(rep_bytes: bytes) -> int | None:
+    """Extract the resource ID from a photo representation blob."""
+    try:
+        dec = _PostboxDecoder(rep_bytes)
+        fields = dec.decode_all_fields()
+        r_data = fields.get('r')
+        if not isinstance(r_data, bytes):
+            return None
+        r_dec = _PostboxDecoder(r_data)
+        r_fields = r_dec.decode_all_fields()
+        i_val = r_fields.get('i')
+        if isinstance(i_val, int):
+            return i_val
+        if isinstance(i_val, bytes) and len(i_val) == 8:
+            return struct.unpack('<q', i_val)[0]
+        return None
+    except (EOFError, struct.error, ValueError):
+        return None
+
+
+def _build_photo_cache(media_dir: Path) -> dict[int, str]:
+    """Build a lookup of resource_id -> best local file path from the media dir.
+
+    Prefers larger size variants (y > x > m > s > c > a > b).
+    """
+    variant_priority = {'y': 6, 'x': 5, 'm': 4, 's': 3, 'c': 2, 'a': 1, 'b': 0}
+    cache: dict[int, tuple[str, int]] = {}
+
+    if not media_dir.exists():
+        return {}
+
+    for f in os.listdir(media_dir):
+        if not f.startswith("telegram-cloud-photo-size-"):
+            continue
+        if f.endswith("_partial") or f.endswith(".meta"):
+            continue
+        parts = f.split("-")
+        if len(parts) < 7:
+            continue
+        try:
+            rid = int(parts[5])
+        except ValueError:
+            continue
+        variant = parts[6]
+        prio = variant_priority.get(variant, -1)
+        if rid not in cache or prio > cache[rid][1]:
+            cache[rid] = (str(media_dir / f), prio)
+
+    return {rid: path for rid, (path, _) in cache.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +672,7 @@ class TelegramDB:
         self._conn: sqlite3.Connection | None = None
         self._plaintext_path: Path | None = None
         self._peer_cache: dict[int, dict] = {}
+        self._photo_cache: dict[int, str] | None = None
 
     @property
     def available(self) -> bool:
@@ -555,6 +693,37 @@ class TelegramDB:
         db_key, db_salt = _decrypt_key(self._key_path)
         self._plaintext_path = _decrypt_database(self._db_path, db_key, db_salt)
         self._conn = sqlite3.connect(str(self._plaintext_path))
+
+    def _get_photo_cache(self) -> dict[int, str]:
+        if self._photo_cache is None:
+            # _db_path is .../postbox/db/db_sqlite, media is at .../postbox/media/
+            media_dir = self._db_path.parent.parent / "media" if self._db_path else None
+            self._photo_cache = _build_photo_cache(media_dir) if media_dir else {}
+        return self._photo_cache
+
+    def _resolve_image_paths(self, msg: dict) -> list[str]:
+        """Resolve image file paths from message media data."""
+        tags = msg.get("tags", 0)
+        if not (tags & 1):  # bit 0 = PhotoOrVideo
+            return []
+        post_text = msg.get("_post_text", b"")
+        if not post_text:
+            return []
+        rids = _extract_photo_resource_ids(post_text)
+        if not rids:
+            return []
+        cache = self._get_photo_cache()
+        # Deduplicate (representations share the same resource ID)
+        seen = set()
+        paths = []
+        for rid in rids:
+            if rid in seen:
+                continue
+            seen.add(rid)
+            path = cache.get(rid)
+            if path:
+                paths.append(path)
+        return paths
 
     def close(self):
         if self._conn:
@@ -696,7 +865,14 @@ class TelegramDB:
         for key, value in rows:
             idx = _parse_message_key(key)
             msg = _parse_message_value(value)
-            if msg is None or not msg["text"]:
+            if msg is None:
+                continue
+
+            image_paths = self._resolve_image_paths(msg)
+            text = msg["text"]
+            if image_paths and not text:
+                text = " ".join(f"[image]" for _ in image_paths)
+            if not text and not image_paths:
                 continue
 
             # Resolve sender
@@ -712,10 +888,11 @@ class TelegramDB:
             messages.append({
                 "timestamp": ts,
                 "sender": sender,
-                "text": msg["text"],
+                "text": text,
                 "edited": False,
                 "peer_id": idx["peer_id"],
                 "message_id": idx["message_id"],
+                "image_paths": image_paths,
             })
 
         return messages
@@ -791,6 +968,8 @@ class TelegramDB:
 
             peer = self._get_peer(idx["peer_id"])
 
+            image_paths = self._resolve_image_paths(msg)
+
             messages.append({
                 "peer_id": idx["peer_id"],
                 "peer_name": _peer_display_name(peer),
@@ -799,6 +978,7 @@ class TelegramDB:
                 "text": msg["text"],
                 "is_from_me": not msg["incoming"],
                 "sender_name": sender_name,
+                "image_paths": [str(p) for p in image_paths],
             })
 
         return messages
