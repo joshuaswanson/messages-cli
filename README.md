@@ -158,10 +158,14 @@ messenger   Messages: 1,204   Chats: 31
 
 ## How it works
 
-**Messages** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly for reading. Sends via AppleScript. Resolves phone numbers to contact names, shows reactions and attachments, formats phone numbers by country code.
+**Messages** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly for reading. Sends via AppleScript. Resolves phone numbers to contact names, shows reactions and attachments, formats phone numbers by country code. Image attachments are returned as local file paths from `~/Library/Messages/Attachments/`.
 
 **Telegram** -- Decrypts the local Telegram database (SQLCipher-encrypted postbox) for reading. For sending, it extracts the persistent MTProto auth key from the local database and uses Telethon to make API calls, no separate login needed.
 
-**WhatsApp** -- Reads the WhatsApp Desktop SQLite databases (`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/`) directly. Resolves contact names from the contacts database and group member tables. For sending, uses a Go binary (whatsmeow) with a one-time QR code pairing flow.
+**WhatsApp** -- Reads the WhatsApp Desktop SQLite databases (`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/`) directly. Resolves contact names from the contacts database and group member tables. For sending, uses a Go binary (whatsmeow) with a one-time QR code pairing flow. Image attachments are returned as local file paths from the WhatsApp media cache.
 
-**Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. For loading older messages beyond the initial page (~20), uses a Go binary (mautrix-meta) that connects via Facebook's MQTT WebSocket protocol. Sends messages via Facebook's Lightspeed GraphQL API.
+**Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. For loading older messages beyond the initial page (~20), uses a Go binary (mautrix-meta) that connects via Facebook's MQTT WebSocket protocol. Sends messages via Facebook's Lightspeed GraphQL API. Image attachments are downloaded from Facebook's CDN to `~/.cache/messages-cli/messenger/`.
+
+### Image paths
+
+All platforms return an `image_paths` field in message dicts containing local file paths to image attachments. This enables downstream tools (like training data pipelines) to access images uniformly across platforms.
