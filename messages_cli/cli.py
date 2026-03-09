@@ -3,7 +3,7 @@
 import click
 import phonenumbers
 
-from . import db, send, backends
+from . import db, send, backends, whatsapp_auth
 
 # Colors
 DIM = "bright_black"
@@ -16,9 +16,10 @@ ATTACHMENT = "yellow"
 PLATFORM_TAGS = {
     "messages": "ms",
     "telegram": "tg",
+    "whatsapp": "wa",
 }
 
-VALID_PLATFORMS = ("messages", "telegram")
+VALID_PLATFORMS = ("messages", "telegram", "whatsapp")
 
 
 def _format_phone(value: str) -> str:
@@ -69,7 +70,7 @@ def _format_message(m: dict, full: bool) -> str:
     is_me = m["sender"] == "Me"
     sender_text = m["sender"] if is_me else _format_phone(m["sender"])
     sender = click.style(sender_text, fg=SENDER_ME if is_me else SENDER_OTHER)
-    if m["edited"]:
+    if m.get("edited"):
         sender += click.style(" [edited]", fg=EDITED)
 
     text = _truncate(m["text"], full)
@@ -275,3 +276,17 @@ def stats_cmd(platform: str | None):
     for r in rows:
         label = click.style(r["platform"], bold=True)
         click.echo(f"{label}  Messages: {r['messages']:,}  Chats: {r['chats']:,}")
+
+
+# --- auth ---
+
+
+@cli.group()
+def auth():
+    """Authenticate with messaging platforms."""
+
+
+@auth.command("whatsapp")
+def auth_whatsapp():
+    """Authenticate with WhatsApp (QR code pairing)."""
+    whatsapp_auth.run_auth()

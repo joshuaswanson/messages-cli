@@ -11,7 +11,7 @@ import atexit
 import re
 from pathlib import Path
 
-from . import db, send, telegram_send
+from . import db, send, telegram_send, whatsapp_db, whatsapp_send
 
 # Telegram container path (same as telegram_db.py)
 _TG_CONTAINER = Path.home() / "Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
@@ -43,6 +43,8 @@ def available_platforms() -> list[str]:
                 break
         if "telegram" in platforms:
             break
+    if whatsapp_db.is_available():
+        platforms.append("whatsapp")
     return platforms
 
 
@@ -127,6 +129,18 @@ def recent_chats(limit: int, platform: str | None = None) -> list[dict]:
                 "username": c.get("username", ""),
             })
 
+    if _want(platform, "whatsapp"):
+        chats = whatsapp_db.recent_chats(limit)
+        for c in chats:
+            results.append({
+                "name": c["name"],
+                "id": c["jid"],
+                "platform": "whatsapp",
+                "last_message": c["last_message"],
+                "phone": _format_phone(c["phone"]) if c.get("phone") else "",
+                "username": "",
+            })
+
     # Sort by last_message descending and take top limit
     results.sort(key=lambda x: x["last_message"], reverse=True)
     return results[:limit]
@@ -159,6 +173,17 @@ def find_chats(query: str, platform: str | None = None) -> list[dict]:
                 "username": c.get("username", ""),
             })
 
+    if _want(platform, "whatsapp"):
+        matches = whatsapp_db.find_chats(query)
+        for c in matches:
+            results.append({
+                "name": c["name"],
+                "id": c["jid"],
+                "platform": "whatsapp",
+                "phone": _format_phone(c["phone"]) if c.get("phone") else "",
+                "username": "",
+            })
+
     return results
 
 
@@ -182,9 +207,16 @@ def read_messages(
             return []
         return tdb.read_messages(peer_id, limit)
 
-    # Auto-detect: try both platforms
+    if platform == "whatsapp":
+        jid = whatsapp_db.resolve_identifier(identifier)
+        if jid is None:
+            return []
+        return whatsapp_db.read_messages(jid, limit)
+
+    # Auto-detect: try all platforms
     im_chat_id = None
     tg_peer_id = None
+    wa_jid = None
 
     if "messages" in available_platforms():
         resolved = db.resolve_identifier(identifier)
@@ -202,9 +234,13 @@ def read_messages(
         tdb = _get_telegram_db()
         tg_peer_id = tdb.resolve_identifier(identifier)
 
-    if im_chat_id and tg_peer_id:
+    if "whatsapp" in available_platforms():
+        wa_jid = whatsapp_db.resolve_identifier(identifier)
+
+    found = [name for name, val in [("Messages", im_chat_id), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid)] if val]
+    if len(found) > 1:
         raise SystemExit(
-            f'Found "{identifier}" on both Messages and Telegram. '
+            f'Found "{identifier}" on {" and ".join(found)}. '
             "Use --platform/-p to specify which one."
         )
 
@@ -213,6 +249,8 @@ def read_messages(
     if tg_peer_id:
         tdb = _get_telegram_db()
         return tdb.read_messages(tg_peer_id, limit)
+    if wa_jid:
+        return whatsapp_db.read_messages(wa_jid, limit)
 
     return []
 
@@ -248,6 +286,17 @@ def search_messages(
                 "platform": "telegram",
             })
 
+    if _want(platform, "whatsapp"):
+        rows = whatsapp_db.search_messages(query, limit)
+        for r in rows:
+            results.append({
+                "timestamp": r["timestamp"],
+                "chat_name": r["chat_name"],
+                "sender": r["sender"],
+                "text": r["text"],
+                "platform": "whatsapp",
+            })
+
     results.sort(key=lambda x: x["timestamp"], reverse=True)
     return results[:limit]
 
@@ -274,6 +323,14 @@ def stats(platform: str | None = None) -> list[dict]:
             "platform": "telegram",
             "messages": s["messages"],
             "chats": s["peers"],
+        })
+
+    if _want(platform, "whatsapp"):
+        s = whatsapp_db.stats()
+        results.append({
+            "platform": "whatsapp",
+            "messages": s["messages"],
+            "chats": s["chats"],
         })
 
     return results
@@ -308,9 +365,21 @@ def send_message(
         result = asyncio.run(telegram_send.send_message(peer_id, text))
         return "telegram", result
 
+    if platform == "whatsapp":
+        if not whatsapp_send.is_available():
+            raise SystemExit(
+                "WhatsApp send not available. Ensure wa-send is built and session exists."
+            )
+        jid = whatsapp_db.resolve_identifier(identifier)
+        if jid is None:
+            raise SystemExit(f'Could not find WhatsApp chat for "{identifier}".')
+        result = whatsapp_send.send_message(jid, text)
+        return "whatsapp", result
+
     # Auto-detect
     im_phone = None
     tg_peer_id = None
+    wa_jid = None
 
     if "messages" in available_platforms():
         resolved = db.resolve_identifier(identifier)
@@ -325,9 +394,13 @@ def send_message(
         tdb = _get_telegram_db()
         tg_peer_id = tdb.resolve_identifier(identifier)
 
-    if im_phone and tg_peer_id:
+    if "whatsapp" in available_platforms() and whatsapp_send.is_available():
+        wa_jid = whatsapp_db.resolve_identifier(identifier)
+
+    found = [(n, v) for n, v in [("Messages", im_phone), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid)] if v]
+    if len(found) > 1:
         raise SystemExit(
-            f'Found "{identifier}" on both Messages and Telegram. '
+            f'Found "{identifier}" on {" and ".join(n for n, _ in found)}. '
             "Use --platform/-p to specify which one."
         )
 
@@ -338,6 +411,10 @@ def send_message(
     if tg_peer_id:
         result = asyncio.run(telegram_send.send_message(tg_peer_id, text))
         return "telegram", result
+
+    if wa_jid:
+        result = whatsapp_send.send_message(wa_jid, text)
+        return "whatsapp", result
 
     raise SystemExit(f'Could not find "{identifier}" on any platform.')
 
@@ -366,9 +443,22 @@ def resolve_send_target(
         from .telegram_db import _peer_display_name
         return "telegram", _peer_display_name(peer)
 
+    if platform == "whatsapp":
+        if not whatsapp_send.is_available():
+            raise SystemExit(
+                "WhatsApp send not available. Ensure wa-send is built and session exists."
+            )
+        jid = whatsapp_db.resolve_identifier(identifier)
+        if jid is None:
+            raise SystemExit(f'Could not find WhatsApp chat for "{identifier}".')
+        chats = whatsapp_db.find_chats(identifier)
+        name = chats[0]["name"] if chats else jid
+        return "whatsapp", name
+
     # Auto-detect
     im_phone = None
     tg_peer_id = None
+    wa_jid = None
 
     if "messages" in available_platforms():
         resolved = db.resolve_identifier(identifier)
@@ -383,9 +473,13 @@ def resolve_send_target(
         tdb = _get_telegram_db()
         tg_peer_id = tdb.resolve_identifier(identifier)
 
-    if im_phone and tg_peer_id:
+    if "whatsapp" in available_platforms() and whatsapp_send.is_available():
+        wa_jid = whatsapp_db.resolve_identifier(identifier)
+
+    found = [(n, v) for n, v in [("Messages", im_phone), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid)] if v]
+    if len(found) > 1:
         raise SystemExit(
-            f'Found "{identifier}" on both Messages and Telegram. '
+            f'Found "{identifier}" on {" and ".join(n for n, _ in found)}. '
             "Use --platform/-p to specify which one."
         )
 
@@ -397,5 +491,10 @@ def resolve_send_target(
         peer = tdb._get_peer(tg_peer_id)
         from .telegram_db import _peer_display_name
         return "telegram", _peer_display_name(peer)
+
+    if wa_jid:
+        chats = whatsapp_db.find_chats(identifier)
+        name = chats[0]["name"] if chats else wa_jid
+        return "whatsapp", name
 
     raise SystemExit(f'Could not find "{identifier}" on any platform.')

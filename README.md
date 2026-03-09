@@ -1,14 +1,14 @@
 # messages-cli
 
-Read, search, and send messages across iMessage, SMS/RCS, and Telegram from the terminal. macOS only.
+Read, search, and send messages across iMessage, SMS/RCS, Telegram, and WhatsApp from the terminal. macOS only.
 
 ## Platforms
 
 - **Messages** -- iMessage and SMS/RCS (blue and green bubbles)
 - **Telegram** -- Full support including sending (piggybacks on your Telegram.app session)
-- **WhatsApp** -- Coming soon
+- **WhatsApp** -- Full support including sending (requires WhatsApp Desktop and one-time QR auth for sending)
 
-All commands work across platforms by default. Use `--platform/-p` to filter by a specific platform (`messages` or `telegram`). Platform tags `[ms]`/`[tg]` appear in merged output.
+All commands work across platforms by default. Use `--platform/-p` to filter by a specific platform (`messages`, `telegram`, or `whatsapp`). Platform tags `[ms]`/`[tg]`/`[wa]` appear in merged output.
 
 ## Install
 
@@ -18,21 +18,38 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 uv run messages --help
 ```
 
+### WhatsApp sending setup
+
+Reading WhatsApp messages works out of the box (reads the WhatsApp Desktop database directly). To enable sending, you need to authenticate once:
+
+```bash
+# Build the auth tool (requires Go)
+cd wa-auth-tool && go build -o wa-auth && cd ..
+
+# Build the send tool
+cd wa-send-tool && go build -o wa-send && cd ..
+
+# Authenticate by scanning a QR code with your phone
+messages auth whatsapp
+```
+
+This creates a session at `~/.whatsapp-cli/whatsapp.db`. You only need to do this once.
+
 ## Usage
 
 ### List recent chats
 
 ```bash
 $ messages chats recent --limit 4
-Alice Johnson  [tg]  2026-02-28 14:30:12  @alicej  +41 79 123 45 67
-John Smith     [ms]  2026-02-28 14:30:12  +1 206-555-1234
-Family Group   [tg]  2026-02-27 09:15:43
-Book Club      [ms]  2026-02-26 20:00:01
+Alice Johnson  2026-02-28 14:30:12  [tg]  @alicej  +41 79 123 45 67
+John Smith     2026-02-28 14:30:12  [ms]  +1 206-555-1234
+Family Group   2026-02-27 09:15:43  [wa]
+Book Club      2026-02-26 20:00:01  [ms]
 
-$ messages chats recent --platform telegram --limit 3
-Alice Johnson    2026-02-28 14:30:12  @alicej  +41 79 123 45 67
+$ messages chats recent --platform whatsapp --limit 3
 Family Group     2026-02-27 09:15:43
-Bob Williams     2026-02-26 20:00:01  @bobw
+Alice Johnson    2026-02-26 20:00:01  +41 79 123 45 67
+Work Chat        2026-02-25 18:00:00
 ```
 
 ### Find chats
@@ -40,6 +57,7 @@ Bob Williams     2026-02-26 20:00:01  @bobw
 ```bash
 $ messages chats find "Alice"
 Alice Johnson  [tg]  @alicej  +41 79 123 45 67
+Alice Johnson  [wa]  +41 79 123 45 67
 
 $ messages chats find "John"
 John Smith  [ms]  +1 206-555-1234
@@ -56,19 +74,19 @@ $ messages read "Sarah" --limit 3
 2026-02-27 08:12:30  Me          No worries, I'll grab us a table
 2026-02-27 09:15:43  Sarah Chen  Thanks for breakfast! [image: IMG_2041.heic]
 
-$ messages read "+41 79 123 45 67" --limit 3
-2026-02-27 08:10:00  Alice Johnson  Did you see the news?
-2026-02-27 08:12:30  Me             Yeah, wild
-2026-02-27 09:15:43  Alice Johnson  Right??
+$ messages read "Family Group" -p whatsapp --limit 3
+2026-02-27 10:00:00  Dad   Anyone free for dinner Sunday?
+2026-02-27 10:05:00  Me    I'm in
+2026-02-27 10:10:00  Mom   Me too!
 ```
 
 ### Search messages
 
 ```bash
 $ messages search "dinner" --limit 3
-2026-02-27 18:30:00  +1 206-555-1234  Me          Dinner at 7?           [ms]
-2026-02-26 12:15:00  Family Group     Bob Williams Dinner plans?          [tg]
-2026-02-25 09:00:00  +1 415-555-9876  Sarah Chen  Thanks for dinner!     [ms]
+2026-02-27 18:30:00  John Smith    Me          Dinner at 7?           [ms]
+2026-02-26 12:15:00  Family Group  Dad         Dinner plans?          [wa]
+2026-02-25 09:00:00  Sarah Chen    Sarah Chen  Thanks for dinner!     [ms]
 ```
 
 ### Send a message
@@ -80,14 +98,7 @@ $ messages send "Sarah" "Hey, are we still on for tomorrow?"
 Would send [ms] to +1 415-555-9876: Hey, are we still on for tomorrow?
 Pass --confirm to actually send.
 
-$ messages send "+1 415-555-9876" "On my way!" --confirm
-Message sent.
-
-$ messages send "Alice" "See you at 3" -p telegram
-Would send [tg] to Alice Johnson: See you at 3
-Pass --confirm to actually send.
-
-$ messages send "Alice" "See you at 3" -p telegram --confirm
+$ messages send "Alice" "See you at 3" -p whatsapp --confirm
 Message sent.
 ```
 
@@ -98,7 +109,16 @@ $ messages contacts search "John"
 John Smith
   phone: +1 206 555 1234
   phone: +41 78 555 6789
-  email: john.smith@gmail.com
+  email: john.smith@example.com
+```
+
+### Authenticate
+
+```bash
+$ messages auth whatsapp
+Scan the QR code below with WhatsApp on your phone:
+Open WhatsApp > Settings > Linked Devices > Link a Device
+# QR code appears here
 ```
 
 ### Statistics
@@ -107,15 +127,20 @@ John Smith
 $ messages stats
 messages   Messages: 48,291  Chats: 142
 telegram   Messages: 28,529  Chats: 207
+whatsapp   Messages: 12,847  Chats: 89
 ```
 
 ## Requirements
 
-- **Full Disk Access** -- Grant your terminal app Full Disk Access in System Settings > Privacy & Security. Required for reading the iMessage and Telegram databases.
+- **Full Disk Access** -- Grant your terminal app Full Disk Access in System Settings > Privacy & Security. Required for reading the iMessage, Telegram, and WhatsApp databases.
 - **sqlcipher** -- `brew install sqlcipher`. Required for Telegram support.
+- **Go** -- Required to build the WhatsApp send/auth tools. `brew install go`.
+- **WhatsApp Desktop** -- The native macOS app (not the web version). Required for WhatsApp reading.
 
 ## How it works
 
 **Messages** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly for reading. Sends via AppleScript. Resolves phone numbers to contact names, shows reactions and attachments, formats phone numbers by country code.
 
-**Telegram** -- Decrypts the local Telegram database (SQLCipher-encrypted postbox) for reading. For sending, it extracts the persistent MTProto auth key from the local database and uses Telethon to make API calls -- no separate login needed, it piggybacks on your existing Telegram.app session.
+**Telegram** -- Decrypts the local Telegram database (SQLCipher-encrypted postbox) for reading. For sending, it extracts the persistent MTProto auth key from the local database and uses Telethon to make API calls, no separate login needed.
+
+**WhatsApp** -- Reads the WhatsApp Desktop SQLite databases (`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/`) directly. Resolves contact names from the contacts database and group member tables. For sending, uses a Go binary (whatsmeow) with a one-time QR code pairing flow.
