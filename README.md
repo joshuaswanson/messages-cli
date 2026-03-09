@@ -1,14 +1,15 @@
 # messages-cli
 
-Read, search, and send messages across iMessage, SMS/RCS, Telegram, and WhatsApp from the terminal. macOS only.
+Read, search, and send messages across iMessage, SMS/RCS, Telegram, WhatsApp, and Facebook Messenger from the terminal. macOS only.
 
 ## Platforms
 
 - **Messages** -- iMessage and SMS/RCS (blue and green bubbles)
 - **Telegram** -- Full support including sending (piggybacks on your Telegram.app session)
 - **WhatsApp** -- Full support including sending (requires WhatsApp Desktop and one-time QR auth for sending)
+- **Messenger** -- Full support including sending (requires one-time browser login for cookie extraction)
 
-All commands work across platforms by default. Use `--platform/-p` to filter by a specific platform (`messages`, `telegram`, or `whatsapp`). Platform tags `[ms]`/`[tg]`/`[wa]` appear in merged output.
+All commands work across platforms by default. Use `--platform/-p` to filter by a specific platform (`messages`, `telegram`, `whatsapp`, or `messenger`). Platform tags `[ms]`/`[tg]`/`[wa]`/`[fb]` appear in merged output.
 
 ## Install
 
@@ -34,6 +35,18 @@ messages auth whatsapp
 ```
 
 This creates a session at `~/.whatsapp-cli/whatsapp.db`. You only need to do this once.
+
+### Messenger setup
+
+```bash
+# Build the pagination tool (requires Go)
+cd fb-fetch-tool && go build -o fb-fetch && cd ..
+
+# Log in via browser to extract cookies
+messages auth messenger
+```
+
+Cookies are saved to `~/.config/messages-cli/messenger_cookies.json`. The fb-fetch binary is only needed for loading older messages (pagination); basic reading and sending work without it.
 
 ## Usage
 
@@ -119,23 +132,29 @@ $ messages auth whatsapp
 Scan the QR code below with WhatsApp on your phone:
 Open WhatsApp > Settings > Linked Devices > Link a Device
 # QR code appears here
+
+$ messages auth messenger
+# Opens a browser window to log into messenger.com
+# Cookies are saved to ~/.config/messages-cli/messenger_cookies.json
 ```
 
 ### Statistics
 
 ```bash
 $ messages stats
-messages   Messages: 48,291  Chats: 142
-telegram   Messages: 28,529  Chats: 207
-whatsapp   Messages: 12,847  Chats: 89
+messages    Messages: 48,291  Chats: 142
+telegram    Messages: 28,529  Chats: 207
+whatsapp    Messages: 12,847  Chats: 89
+messenger   Messages: 1,204   Chats: 31
 ```
 
 ## Requirements
 
 - **Full Disk Access** -- Grant your terminal app Full Disk Access in System Settings > Privacy & Security. Required for reading the iMessage, Telegram, and WhatsApp databases.
 - **sqlcipher** -- `brew install sqlcipher`. Required for Telegram support.
-- **Go** -- Required to build the WhatsApp send/auth tools. `brew install go`.
+- **Go** -- Required to build the WhatsApp send/auth tools and the Messenger pagination tool. `brew install go`.
 - **WhatsApp Desktop** -- The native macOS app (not the web version). Required for WhatsApp reading.
+- **Messenger cookies** -- Run `messages auth messenger` to log in via browser. Required for Messenger support.
 
 ## How it works
 
@@ -144,3 +163,5 @@ whatsapp   Messages: 12,847  Chats: 89
 **Telegram** -- Decrypts the local Telegram database (SQLCipher-encrypted postbox) for reading. For sending, it extracts the persistent MTProto auth key from the local database and uses Telethon to make API calls, no separate login needed.
 
 **WhatsApp** -- Reads the WhatsApp Desktop SQLite databases (`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/`) directly. Resolves contact names from the contacts database and group member tables. For sending, uses a Go binary (whatsmeow) with a one-time QR code pairing flow.
+
+**Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. For loading older messages beyond the initial page (~20), uses a Go binary (mautrix-meta) that connects via Facebook's MQTT WebSocket protocol. Sends messages via Facebook's Lightspeed GraphQL API.

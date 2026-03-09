@@ -3,7 +3,7 @@
 import click
 import phonenumbers
 
-from . import db, send, backends, whatsapp_auth
+from . import db, send, backends, whatsapp_auth, messenger_auth
 
 # Colors
 DIM = "bright_black"
@@ -17,9 +17,10 @@ PLATFORM_TAGS = {
     "messages": "ms",
     "telegram": "tg",
     "whatsapp": "wa",
+    "messenger": "fb",
 }
 
-VALID_PLATFORMS = ("messages", "telegram", "whatsapp")
+VALID_PLATFORMS = ("messages", "telegram", "whatsapp", "messenger")
 
 
 def _format_phone(value: str) -> str:
@@ -290,3 +291,9 @@ def auth():
 def auth_whatsapp():
     """Authenticate with WhatsApp (QR code pairing)."""
     whatsapp_auth.run_auth()
+
+
+@auth.command("messenger")
+def auth_messenger():
+    """Authenticate with Facebook Messenger (browser login)."""
+    messenger_auth.run_auth()

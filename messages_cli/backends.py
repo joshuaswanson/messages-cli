@@ -11,7 +11,7 @@ import atexit
 import re
 from pathlib import Path
 
-from . import db, send, telegram_send, whatsapp_db, whatsapp_send
+from . import db, send, telegram_send, whatsapp_db, whatsapp_send, messenger_api
 
 # Telegram container path (same as telegram_db.py)
 _TG_CONTAINER = Path.home() / "Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
@@ -45,6 +45,8 @@ def available_platforms() -> list[str]:
             break
     if whatsapp_db.is_available():
         platforms.append("whatsapp")
+    if messenger_api.is_available():
+        platforms.append("messenger")
     return platforms
 
 
@@ -141,6 +143,18 @@ def recent_chats(limit: int, platform: str | None = None) -> list[dict]:
                 "username": "",
             })
 
+    if _want(platform, "messenger"):
+        chats = messenger_api.recent_chats(limit)
+        for c in chats:
+            results.append({
+                "name": c["name"],
+                "id": c["thread_id"],
+                "platform": "messenger",
+                "last_message": c["last_message"],
+                "phone": "",
+                "username": "",
+            })
+
     # Sort by last_message descending and take top limit
     results.sort(key=lambda x: x["last_message"], reverse=True)
     return results[:limit]
@@ -184,6 +198,17 @@ def find_chats(query: str, platform: str | None = None) -> list[dict]:
                 "username": "",
             })
 
+    if _want(platform, "messenger"):
+        matches = messenger_api.find_chats(query)
+        for c in matches:
+            results.append({
+                "name": c["name"],
+                "id": c["thread_id"],
+                "platform": "messenger",
+                "phone": "",
+                "username": "",
+            })
+
     return results
 
 
@@ -213,6 +238,12 @@ def read_messages(
             return []
         return whatsapp_db.read_messages(jid, limit)
 
+    if platform == "messenger":
+        thread_id = messenger_api.resolve_identifier(identifier)
+        if thread_id is None:
+            return []
+        return messenger_api.read_messages(thread_id, limit)
+
     # Auto-detect: try all platforms
     im_chat_id = None
     tg_peer_id = None
@@ -237,7 +268,11 @@ def read_messages(
     if "whatsapp" in available_platforms():
         wa_jid = whatsapp_db.resolve_identifier(identifier)
 
-    found = [name for name, val in [("Messages", im_chat_id), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid)] if val]
+    fb_thread_id = None
+    if "messenger" in available_platforms():
+        fb_thread_id = messenger_api.resolve_identifier(identifier)
+
+    found = [name for name, val in [("Messages", im_chat_id), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid), ("Messenger", fb_thread_id)] if val]
     if len(found) > 1:
         raise SystemExit(
             f'Found "{identifier}" on {" and ".join(found)}. '
@@ -251,6 +286,8 @@ def read_messages(
         return tdb.read_messages(tg_peer_id, limit)
     if wa_jid:
         return whatsapp_db.read_messages(wa_jid, limit)
+    if fb_thread_id:
+        return messenger_api.read_messages(fb_thread_id, limit)
 
     return []
 
@@ -297,6 +334,17 @@ def search_messages(
                 "platform": "whatsapp",
             })
 
+    if _want(platform, "messenger"):
+        rows = messenger_api.search_messages(query, limit)
+        for r in rows:
+            results.append({
+                "timestamp": r["timestamp"],
+                "chat_name": r["chat_name"],
+                "sender": r["sender"],
+                "text": r["text"],
+                "platform": "messenger",
+            })
+
     results.sort(key=lambda x: x["timestamp"], reverse=True)
     return results[:limit]
 
@@ -329,6 +377,14 @@ def stats(platform: str | None = None) -> list[dict]:
         s = whatsapp_db.stats()
         results.append({
             "platform": "whatsapp",
+            "messages": s["messages"],
+            "chats": s["chats"],
+        })
+
+    if _want(platform, "messenger"):
+        s = messenger_api.stats()
+        results.append({
+            "platform": "messenger",
             "messages": s["messages"],
             "chats": s["chats"],
         })
@@ -376,6 +432,17 @@ def send_message(
         result = whatsapp_send.send_message(jid, text)
         return "whatsapp", result
 
+    if platform == "messenger":
+        if not messenger_api.is_available():
+            raise SystemExit(
+                "Messenger not available. Run 'messages auth messenger' to set up."
+            )
+        thread_id = messenger_api.resolve_identifier(identifier)
+        if thread_id is None:
+            raise SystemExit(f'Could not find Messenger chat for "{identifier}".')
+        result = messenger_api.send_message(thread_id, text)
+        return "messenger", result
+
     # Auto-detect
     im_phone = None
     tg_peer_id = None
@@ -397,7 +464,11 @@ def send_message(
     if "whatsapp" in available_platforms() and whatsapp_send.is_available():
         wa_jid = whatsapp_db.resolve_identifier(identifier)
 
-    found = [(n, v) for n, v in [("Messages", im_phone), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid)] if v]
+    fb_thread_id = None
+    if "messenger" in available_platforms():
+        fb_thread_id = messenger_api.resolve_identifier(identifier)
+
+    found = [(n, v) for n, v in [("Messages", im_phone), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid), ("Messenger", fb_thread_id)] if v]
     if len(found) > 1:
         raise SystemExit(
             f'Found "{identifier}" on {" and ".join(n for n, _ in found)}. '
@@ -415,6 +486,10 @@ def send_message(
     if wa_jid:
         result = whatsapp_send.send_message(wa_jid, text)
         return "whatsapp", result
+
+    if fb_thread_id:
+        result = messenger_api.send_message(fb_thread_id, text)
+        return "messenger", result
 
     raise SystemExit(f'Could not find "{identifier}" on any platform.')
 
@@ -455,6 +530,18 @@ def resolve_send_target(
         name = chats[0]["name"] if chats else jid
         return "whatsapp", name
 
+    if platform == "messenger":
+        if not messenger_api.is_available():
+            raise SystemExit(
+                "Messenger not available. Run 'messages auth messenger' to set up."
+            )
+        thread_id = messenger_api.resolve_identifier(identifier)
+        if thread_id is None:
+            raise SystemExit(f'Could not find Messenger chat for "{identifier}".')
+        chats = messenger_api.find_chats(identifier)
+        name = chats[0]["name"] if chats else thread_id
+        return "messenger", name
+
     # Auto-detect
     im_phone = None
     tg_peer_id = None
@@ -476,7 +563,11 @@ def resolve_send_target(
     if "whatsapp" in available_platforms() and whatsapp_send.is_available():
         wa_jid = whatsapp_db.resolve_identifier(identifier)
 
-    found = [(n, v) for n, v in [("Messages", im_phone), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid)] if v]
+    fb_thread_id = None
+    if "messenger" in available_platforms():
+        fb_thread_id = messenger_api.resolve_identifier(identifier)
+
+    found = [(n, v) for n, v in [("Messages", im_phone), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid), ("Messenger", fb_thread_id)] if v]
     if len(found) > 1:
         raise SystemExit(
             f'Found "{identifier}" on {" and ".join(n for n, _ in found)}. '
@@ -496,5 +587,10 @@ def resolve_send_target(
         chats = whatsapp_db.find_chats(identifier)
         name = chats[0]["name"] if chats else wa_jid
         return "whatsapp", name
+
+    if fb_thread_id:
+        chats = messenger_api.find_chats(identifier)
+        name = chats[0]["name"] if chats else fb_thread_id
+        return "messenger", name
 
     raise SystemExit(f'Could not find "{identifier}" on any platform.')

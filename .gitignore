@@ -7,3 +7,4 @@ dist/
 wa-send-tool/wa-send
 wa-auth-tool/wa-auth
 wa-media-tool/wa-media-tool
+fb-fetch-tool/fb-fetch
