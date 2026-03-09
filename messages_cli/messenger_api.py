@@ -7,6 +7,7 @@ Uses fb-fetch-tool (Go binary) for message pagination via MQTT WebSocket.
 
 import concurrent.futures
 import datetime
+import hashlib
 import json
 import random
 import re
@@ -17,6 +18,7 @@ from pathlib import Path
 import requests
 
 COOKIES_PATH = Path.home() / ".config/messages-cli/messenger_cookies.json"
+_IMAGE_CACHE_DIR = Path.home() / ".cache/messages-cli/messenger"
 
 
 def is_available() -> bool:
@@ -210,6 +212,40 @@ def _fetch_older_messages(thread_id: int, ref_timestamp_ms: int,
         return json.loads(result.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return []
+
+
+def _download_images(urls: list[str], session: requests.Session | None = None) -> dict[str, str]:
+    """Download images to local cache. Returns {url: local_path} for successes."""
+    _IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    result = {}
+
+    def _download_one(url: str) -> tuple[str, str | None]:
+        # Use URL hash as filename to avoid re-downloading
+        url_hash = hashlib.sha256(url.encode()).hexdigest()[:16]
+        # Guess extension from URL
+        ext = ".jpg"
+        if ".png" in url:
+            ext = ".png"
+        elif ".webp" in url:
+            ext = ".webp"
+        local_path = _IMAGE_CACHE_DIR / f"{url_hash}{ext}"
+        if local_path.exists():
+            return url, str(local_path)
+        try:
+            s = session or requests
+            resp = s.get(url, timeout=15)
+            resp.raise_for_status()
+            local_path.write_bytes(resp.content)
+            return url, str(local_path)
+        except Exception:
+            return url, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        for url, path in ex.map(_download_one, urls):
+            if path:
+                result[url] = path
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -439,8 +475,8 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
         if uid is not None and name:
             users[uid] = name
 
-    # Build attachment map: message_id -> list of attachment descriptions
-    attach_map: dict[str, list[str]] = {}
+    # Build attachment map: message_id -> list of (label, image_url_or_none)
+    attach_map: dict[str, list[tuple[str, str | None]]] = {}
     for args in all_calls.get("insertBlobAttachment", []):
         if len(args) <= 32 or args[27] != tid:
             continue
@@ -448,16 +484,18 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
         atype = args[29]  # 2=image, 4=video
         fname = args[0] or ""
         if atype == 4 or fname.startswith("video"):
-            attach_map.setdefault(msg_id, []).append("video")
+            attach_map.setdefault(msg_id, []).append(("video", None))
         else:
-            attach_map.setdefault(msg_id, []).append("image")
+            # args[3] is the full-size image URL
+            url = args[3] if len(args) > 3 and isinstance(args[3], str) else None
+            attach_map.setdefault(msg_id, []).append(("image", url))
 
     for args in all_calls.get("insertStickerAttachment", []):
         if len(args) <= 18 or args[14] != tid:
             continue
         msg_id = args[18]
         label = args[13] if len(args) > 13 and args[13] else "sticker"
-        attach_map.setdefault(msg_id, []).append(f"sticker: {label}")
+        attach_map.setdefault(msg_id, []).append((f"sticker: {label}", None))
 
     # Get messages for this thread
     messages = []
@@ -479,11 +517,14 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
         seen_ids.add(key)
         if not text and not attachments:
             continue
+        # Collect image URLs for downloading
+        image_urls = [url for _, url in attachments if url]
         messages.append({
             "text": text,
             "timestamp": timestamp,
             "author_id": author_id,
             "attachments": attachments,
+            "image_urls": image_urls,
         })
 
     # If we need more messages, use MQTT pagination via fb-fetch-tool
@@ -514,6 +555,12 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
 
     messages.sort(key=lambda m: m["timestamp"] or 0, reverse=True)
 
+    # Download images in parallel
+    all_urls = []
+    for m in messages[:limit]:
+        all_urls.extend(m.get("image_urls", []))
+    downloaded = _download_images(all_urls, sess._session) if all_urls else {}
+
     results = []
     for m in messages[:limit]:
         author_id = m["author_id"]
@@ -522,12 +569,17 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
         else:
             sender = users.get(author_id, str(author_id) if author_id else "Unknown")
         text = m["text"] or ""
-        for att in m.get("attachments", []):
-            text = f"{text} [{att}]" if text else f"[{att}]"
+        for label, _ in m.get("attachments", []):
+            text = f"{text} [{label}]" if text else f"[{label}]"
+        image_paths = [
+            downloaded[url] for url in m.get("image_urls", [])
+            if url in downloaded
+        ]
         results.append({
             "timestamp": _ts_to_datetime(m["timestamp"]),
             "sender": sender,
             "text": text,
+            "image_paths": image_paths,
         })
 
     return results

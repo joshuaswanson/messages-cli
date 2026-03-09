@@ -315,6 +315,7 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
     # Get attachments for these messages
     message_ids = [r["message_id"] for r in rows]
     attachment_map: dict[int, list[str]] = {}
+    image_paths_map: dict[int, list[str]] = {}
     if message_ids:
         placeholders = ",".join("?" * len(message_ids))
         att_rows = conn.execute(
@@ -334,6 +335,10 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
             mime = a["mime_type"] or ""
             label = mime.split("/")[0] if "/" in mime else "file"
             attachment_map.setdefault(mid, []).append(f"[{label}: {name}]")
+            if mime.startswith("image/") and a["filename"]:
+                resolved = Path(a["filename"]).expanduser()
+                if resolved.exists():
+                    image_paths_map.setdefault(mid, []).append(str(resolved))
 
     conn.close()
 
@@ -383,6 +388,7 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
                 "sender": sender,
                 "text": content,
                 "edited": edited,
+                "image_paths": image_paths_map.get(r["message_id"], []),
             }
         )
     return messages

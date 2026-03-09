@@ -9,6 +9,7 @@ from pathlib import Path
 _WA_CONTAINER = Path.home() / "Library/Group Containers/group.net.whatsapp.WhatsApp.shared"
 CHAT_DB = _WA_CONTAINER / "ChatStorage.sqlite"
 CONTACTS_DB = _WA_CONTAINER / "ContactsV2.sqlite"
+_MEDIA_BASE = _WA_CONTAINER / "Message"
 
 # CoreData epoch: seconds between 1970-01-01 and 2001-01-01
 COREDATA_EPOCH = 978307200
@@ -357,10 +358,18 @@ def read_messages(jid: str, limit: int = 20) -> list[dict]:
                 push_name = _decode_push_name(r["ZPUSHNAME"])
                 sender = _resolve_sender(from_jid, push_name, False, contact_cache)
 
+        # Resolve image path for image messages (type 1)
+        image_paths: list[str] = []
+        if r["ZMESSAGETYPE"] == 1 and r["ZMEDIALOCALPATH"]:
+            full_path = _MEDIA_BASE / r["ZMEDIALOCALPATH"]
+            if full_path.exists():
+                image_paths.append(str(full_path))
+
         messages.append({
             "timestamp": r["timestamp"],
             "sender": sender,
             "text": text,
+            "image_paths": image_paths,
         })
     return messages
 
