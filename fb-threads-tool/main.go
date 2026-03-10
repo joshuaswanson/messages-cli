@@ -443,6 +443,33 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Timeout reached")
 	}
 
+	// Resolve names for threads that don't have names yet (E2EE DMs, unnamed inbox threads)
+	var unnamed int
+	for i := range allThreads {
+		if allThreads[i].Name == "" && allThreads[i].ThreadType == 1 {
+			unnamed++
+		}
+	}
+	if unnamed > 0 {
+		fmt.Fprintf(os.Stderr, "Resolving names for %d unnamed contacts...\n", unnamed)
+		for i := range allThreads {
+			if allThreads[i].Name != "" || allThreads[i].ThreadType != 1 {
+				continue
+			}
+			resp, err := client.ExecuteTasks(ctx, &socket.GetContactsFullTask{
+				ContactID: allThreads[i].ThreadID,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  GetContactsFullTask(%d) error: %v\n", allThreads[i].ThreadID, err)
+				continue
+			}
+			if len(resp.LSDeleteThenInsertContact) > 0 {
+				allThreads[i].Name = resp.LSDeleteThenInsertContact[0].Name
+				fmt.Fprintf(os.Stderr, "  Resolved %d -> %s\n", allThreads[i].ThreadID, allThreads[i].Name)
+			}
+		}
+	}
+
 	fmt.Fprintf(os.Stderr, "Total: %d threads fetched\n", len(allThreads))
 	out, _ := json.Marshal(allThreads)
 	fmt.Println(string(out))
