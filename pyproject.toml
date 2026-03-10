@@ -10,6 +10,7 @@ dependencies = [
     "mmh3>=4.1,<5",
     "telethon>=1.42.0",
     "requests>=2.32.5",
+    "pywebview>=6.1",
 ]
 
 [project.scripts]
