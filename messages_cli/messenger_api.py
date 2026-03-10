@@ -215,22 +215,23 @@ def _fetch_older_messages(thread_id: int, ref_timestamp_ms: int,
         return []
 
 
-def _fetch_all_threads(max_pages: int = 100) -> list[dict]:
+def _fetch_all_threads(max_pages: int = 100, e2ee: bool = True) -> list[dict]:
     """Fetch all Messenger threads via fb-threads-tool (MQTT WebSocket).
 
     Returns a list of {"thread_id", "name", "last_activity_ms", "snippet", "thread_type"} dicts.
     Requires the fb-threads binary to be built.
+    With e2ee=True, also fetches E2EE encrypted threads (requires go-sqlite3).
     """
     if not _FB_THREADS_BINARY.exists():
         return []
 
+    cmd = [str(_FB_THREADS_BINARY), str(COOKIES_PATH), str(max_pages)]
+    if e2ee:
+        cmd.append("--e2ee")
+
     try:
         result = subprocess.run(
-            [
-                str(_FB_THREADS_BINARY),
-                str(COOKIES_PATH),
-                str(max_pages),
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=300,

@@ -3,8 +3,10 @@ module github.com/joshua/fb-threads-tool
 go 1.26.0
 
 require (
+	github.com/mattn/go-sqlite3 v1.14.34
 	github.com/rs/zerolog v1.34.0
 	go.mau.fi/mautrix-meta v0.2602.0
+	go.mau.fi/whatsmeow v0.0.0-20260216124546-34b971e686b6
 )
 
 require (
@@ -29,7 +31,6 @@ require (
 	github.com/yuin/goldmark v1.7.16 // indirect
 	go.mau.fi/libsignal v0.2.1 // indirect
 	go.mau.fi/util v0.9.6 // indirect
-	go.mau.fi/whatsmeow v0.0.0-20260216124546-34b971e686b6 // indirect
 	go.mau.fi/zeroconfig v0.2.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20260212183809-81e46e3db34a // indirect
