@@ -460,7 +460,7 @@ def recent_chats(limit: int = 20) -> list[dict]:
                 continue
             seen.add(tid)
             results.append({
-                "name": t["name"] or tid,
+                "name": t["name"] or users.get(t["thread_id"], users.get(tid, tid)),
                 "thread_id": tid,
                 "last_message": _ts_to_datetime(t["last_activity_ms"]),
                 "is_group": t["thread_type"] != 1,
@@ -501,7 +501,7 @@ def all_threads() -> list[dict]:
                 continue
             seen.add(tid)
             results.append({
-                "name": t["name"] or tid,
+                "name": t["name"] or users.get(t["thread_id"], users.get(tid, tid)),
                 "thread_id": tid,
                 "last_message": _ts_to_datetime(t["last_activity_ms"]),
                 "is_group": t["thread_type"] != 1,
@@ -538,7 +538,7 @@ def find_chats(query: str) -> list[dict]:
         mqtt_threads = _fetch_all_threads()
         for t in mqtt_threads:
             tid = str(t["thread_id"])
-            name = t["name"] or ""
+            name = t["name"] or users.get(t["thread_id"], users.get(tid, ""))
             if tid in seen:
                 continue
             if name and query_lower in name.lower():

@@ -7,7 +7,8 @@
 // Fetches from both SyncGroup 1 (inbox) and SyncGroup 95 (E2EE/encrypted).
 // Default max_pages is 100 per sync group. Set to 0 for unlimited.
 //
-// With --e2ee flag, initializes E2EE client to access encrypted threads in SyncGroup 95.
+// With --e2ee flag, initializes E2EE client to access encrypted threads.
+// E2EE 1-on-1 DMs are discovered from the Lightspeed createOpenToE2EEThreadLink entries.
 // Device keys are persisted in ~/.config/messages-cli/messenger_e2ee.db.
 package main
 
@@ -25,6 +26,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix"
 	"go.mau.fi/mautrix-meta/pkg/messagix/cookies"
@@ -41,6 +43,60 @@ type OutputThread struct {
 	Snippet        string `json:"snippet"`
 	ThreadType     int64  `json:"thread_type"`
 	Folder         string `json:"folder"`
+}
+
+// e2eeLogInterceptor wraps a zerolog console writer and intercepts
+// createOpenToE2EEThreadLink log entries to extract E2EE 1-on-1 DM thread info.
+type e2eeLogInterceptor struct {
+	inner   zerolog.ConsoleWriter
+	mu      *sync.Mutex
+	threads *[]OutputThread
+	seen    map[int64]bool
+}
+
+func (w *e2eeLogInterceptor) Write(p []byte) (n int, err error) {
+	// Parse the JSON log entry to check for createOpenToE2EEThreadLink
+	var entry map[string]any
+	if json.Unmarshal(p, &entry) == nil {
+		if refName, ok := entry["reference_name"].(string); ok && refName == "createOpenToE2EEThreadLink" {
+			if data, ok := entry["data"].([]any); ok && len(data) >= 4 {
+				// Data format: [[19,"user_id"],[19,"user_id"],true,[19,"timestamp_sec"]]
+				userID := extractInt64FromLSValue(data[0])
+				timestampSec := extractInt64FromLSValue(data[3])
+				if userID != 0 {
+					w.mu.Lock()
+					if !w.seen[userID] {
+						w.seen[userID] = true
+						*w.threads = append(*w.threads, OutputThread{
+							ThreadID:       userID,
+							LastActivityMs: timestampSec * 1000,
+							ThreadType:     1, // 1-on-1 DM
+							Folder:         "e2ee",
+						})
+					}
+					w.mu.Unlock()
+				}
+			}
+		}
+	}
+	return w.inner.Write(p)
+}
+
+// extractInt64FromLSValue extracts an int64 from a Lightspeed value.
+// LS values are encoded as [type, value] arrays, e.g. [19, "12345"].
+func extractInt64FromLSValue(v any) int64 {
+	arr, ok := v.([]any)
+	if !ok || len(arr) < 2 {
+		return 0
+	}
+	switch val := arr[1].(type) {
+	case string:
+		n, _ := strconv.ParseInt(val, 10, 64)
+		return n
+	case float64:
+		return int64(val)
+	}
+	return 0
 }
 
 func main() {
@@ -84,10 +140,33 @@ func main() {
 		cookieMap[cookies.MetaCookieName(k)] = v
 	}
 
-	logger := zerolog.New(zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
+	var (
+		allThreads []OutputThread
+		mu         sync.Mutex
+		seen       = make(map[int64]bool)
+	)
+
+	consoleWriter := zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
 		w.Out = os.Stderr
 		w.TimeFormat = "15:04:05"
-	})).With().Timestamp().Logger().Level(zerolog.WarnLevel)
+	})
+	logger := zerolog.New(consoleWriter).With().Timestamp().Logger().Level(zerolog.WarnLevel)
+
+	// The mautrix-meta lightspeed decoder uses the global zerolog logger (badGlobalLog)
+	// to log unrecognized dependencies like createOpenToE2EEThreadLink.
+	// Intercept the global logger to capture E2EE thread data.
+	if enableE2EE {
+		interceptor := &e2eeLogInterceptor{
+			inner:   consoleWriter,
+			mu:      &mu,
+			threads: &allThreads,
+			seen:    seen,
+		}
+		globalLogger := zerolog.New(interceptor).With().Timestamp().Logger()
+		zerolog.DefaultContextLogger = &globalLogger
+		// Also set the package-level global logger
+		log.Logger = globalLogger
+	}
 
 	c := &cookies.Cookies{Platform: types.Messenger}
 	c.UpdateValues(cookieMap)
@@ -102,6 +181,27 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "LoadMessagesPage failed: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Collect threads from the initial Lightspeed sync
+	if initialTable != nil {
+		mu.Lock()
+		for _, t := range initialTable.LSDeleteThenInsertThread {
+			if seen[t.ThreadKey] {
+				continue
+			}
+			seen[t.ThreadKey] = true
+			allThreads = append(allThreads, OutputThread{
+				ThreadID:       t.ThreadKey,
+				Name:           t.ThreadName,
+				LastActivityMs: t.LastActivityTimestampMs,
+				Snippet:        t.Snippet,
+				ThreadType:     int64(t.ThreadType),
+				Folder:         t.FolderName,
+			})
+		}
+		mu.Unlock()
+		fmt.Fprintf(os.Stderr, "Initial sync: %d threads\n", len(allThreads))
 	}
 
 	// Initialize E2EE if requested
@@ -124,8 +224,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Failed to init device store: %v\n", err)
 			os.Exit(1)
 		}
+		defer func() { _ = container.Close() }()
 
-		// Try to load existing device, or create new one
 		device, err := container.GetFirstDevice(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to get device: %v\n", err)
@@ -164,46 +264,25 @@ func main() {
 		defer e2eeClient.Disconnect()
 		fmt.Fprintln(os.Stderr, "E2EE client connected.")
 
-		// Close DB when done
-		defer func() {
-			_ = container.Close()
-		}()
-
 		// Give E2EE client a moment to sync
 		time.Sleep(2 * time.Second)
+
+		// The E2EE thread links were already captured by the log interceptor
+		// during LoadMessagesPage. Report the count.
+		mu.Lock()
+		fmt.Fprintf(os.Stderr, "After E2EE: %d threads total\n", len(allThreads))
+		mu.Unlock()
 	}
 
+	// MQTT pagination phase
 	var (
-		allThreads []OutputThread
-		mu         sync.Mutex
-		done       = make(chan struct{}, 1)
-		sg1Pages   int
-		sg95Pages  int
-		sg1Done    bool
-		sg95Done   bool
+		mqttDone     = make(chan struct{}, 1)
+		sg1Pages     int
+		sg95Pages    int
+		sg1Done      bool
+		sg95Done     bool
 		pendingFetch bool
 	)
-
-	seen := make(map[int64]bool)
-
-	// Collect threads from the initial Lightspeed sync (includes E2EE threads)
-	if initialTable != nil {
-		for _, t := range initialTable.LSDeleteThenInsertThread {
-			if seen[t.ThreadKey] {
-				continue
-			}
-			seen[t.ThreadKey] = true
-			allThreads = append(allThreads, OutputThread{
-				ThreadID:       t.ThreadKey,
-				Name:           t.ThreadName,
-				LastActivityMs: t.LastActivityTimestampMs,
-				Snippet:        t.Snippet,
-				ThreadType:     int64(t.ThreadType),
-				Folder:         t.FolderName,
-			})
-		}
-		fmt.Fprintf(os.Stderr, "Initial sync: %d threads\n", len(allThreads))
-	}
 
 	client.SetEventHandler(func(ctx context.Context, evt any) {
 		switch e := evt.(type) {
@@ -327,7 +406,7 @@ func main() {
 				mu.Unlock()
 				fmt.Fprintln(os.Stderr, "All sync groups exhausted.")
 				select {
-				case done <- struct{}{}:
+				case mqttDone <- struct{}{}:
 				default:
 				}
 				return
@@ -341,7 +420,7 @@ func main() {
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "ExecuteTasks error: %v\n", err)
 						select {
-						case done <- struct{}{}:
+						case mqttDone <- struct{}{}:
 						default:
 						}
 					}
@@ -358,7 +437,7 @@ func main() {
 	defer client.Disconnect()
 
 	select {
-	case <-done:
+	case <-mqttDone:
 		time.Sleep(500 * time.Millisecond)
 	case <-ctx.Done():
 		fmt.Fprintln(os.Stderr, "Timeout reached")
