@@ -49,6 +49,8 @@ messages auth messenger
 
 Cookies are saved to `~/.config/messages-cli/messenger_cookies.json`. The Go binaries are only needed for pagination: fb-fetch loads older messages within a thread, fb-threads discovers older threads beyond the initial ~15 from the inbox sync. Basic reading and sending work without them.
 
+On first run, fb-threads automatically registers an E2EE device with Facebook's Signal Protocol infrastructure (ICDC) to access end-to-end encrypted threads. Device keys are persisted in `~/.config/messages-cli/messenger_e2ee.db`.
+
 ## Usage
 
 ### List recent chats
@@ -165,7 +167,7 @@ messenger   Messages: 1,204   Chats: 31
 
 **WhatsApp** -- Reads the WhatsApp Desktop SQLite databases (`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/`) directly. Resolves contact names from the contacts database and group member tables. For sending, uses a Go binary (whatsmeow) with a one-time QR code pairing flow. Image attachments are returned as local file paths from the WhatsApp media cache.
 
-**Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. Two Go binaries (using mautrix-meta) connect via Facebook's MQTT WebSocket protocol for pagination: fb-fetch pages through older messages within a thread, and fb-threads pages through the thread list itself (the initial Lightspeed sync only returns ~15 recent threads). Sends messages via Facebook's Lightspeed GraphQL API. Image attachments are downloaded from Facebook's CDN to `~/.cache/messages-cli/messenger/`.
+**Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. Two Go binaries (using mautrix-meta) connect via Facebook's MQTT WebSocket protocol for pagination: fb-fetch pages through older messages within a thread, and fb-threads pages through the thread list itself (the initial Lightspeed sync only returns ~15 recent threads). fb-threads also registers an E2EE device via Facebook's ICDC protocol (Signal Protocol key exchange) to access end-to-end encrypted threads, which Facebook migrated most conversations to in 2023. Device keys are persisted locally in a SQLite database. Sends messages via Facebook's Lightspeed GraphQL API. Image attachments are downloaded from Facebook's CDN to `~/.cache/messages-cli/messenger/`.
 
 ### Image paths
 
