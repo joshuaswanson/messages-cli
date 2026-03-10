@@ -39,14 +39,15 @@ This creates a session at `~/.whatsapp-cli/whatsapp.db`. You only need to do thi
 ### Messenger setup
 
 ```bash
-# Build the pagination tool (requires Go)
+# Build the pagination tools (requires Go)
 cd fb-fetch-tool && go build -o fb-fetch && cd ..
+cd fb-threads-tool && go build -o fb-threads && cd ..
 
 # Log in via browser to extract cookies
 messages auth messenger
 ```
 
-Cookies are saved to `~/.config/messages-cli/messenger_cookies.json`. The fb-fetch binary is only needed for loading older messages (pagination); basic reading and sending work without it.
+Cookies are saved to `~/.config/messages-cli/messenger_cookies.json`. The Go binaries are only needed for pagination: fb-fetch loads older messages within a thread, fb-threads discovers older threads beyond the initial ~15 from the inbox sync. Basic reading and sending work without them.
 
 ## Usage
 
@@ -164,7 +165,7 @@ messenger   Messages: 1,204   Chats: 31
 
 **WhatsApp** -- Reads the WhatsApp Desktop SQLite databases (`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/`) directly. Resolves contact names from the contacts database and group member tables. For sending, uses a Go binary (whatsmeow) with a one-time QR code pairing flow. Image attachments are returned as local file paths from the WhatsApp media cache.
 
-**Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. For loading older messages beyond the initial page (~20), uses a Go binary (mautrix-meta) that connects via Facebook's MQTT WebSocket protocol. Sends messages via Facebook's Lightspeed GraphQL API. Image attachments are downloaded from Facebook's CDN to `~/.cache/messages-cli/messenger/`.
+**Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. Two Go binaries (using mautrix-meta) connect via Facebook's MQTT WebSocket protocol for pagination: fb-fetch pages through older messages within a thread, and fb-threads pages through the thread list itself (the initial Lightspeed sync only returns ~15 recent threads). Sends messages via Facebook's Lightspeed GraphQL API. Image attachments are downloaded from Facebook's CDN to `~/.cache/messages-cli/messenger/`.
 
 ### Image paths
 

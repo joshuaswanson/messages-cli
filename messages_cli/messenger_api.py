@@ -183,6 +183,7 @@ class MessengerSession:
 # ---------------------------------------------------------------------------
 
 _FB_FETCH_BINARY = Path(__file__).parent.parent / "fb-fetch-tool" / "fb-fetch"
+_FB_THREADS_BINARY = Path(__file__).parent.parent / "fb-threads-tool" / "fb-threads"
 
 
 def _fetch_older_messages(thread_id: int, ref_timestamp_ms: int,
@@ -208,6 +209,34 @@ def _fetch_older_messages(thread_id: int, ref_timestamp_ms: int,
             timeout=60,
         )
         if result.returncode != 0:
+            return []
+        return json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return []
+
+
+def _fetch_all_threads(max_pages: int = 100) -> list[dict]:
+    """Fetch all Messenger threads via fb-threads-tool (MQTT WebSocket).
+
+    Returns a list of {"thread_id", "name", "last_activity_ms", "snippet", "thread_type"} dicts.
+    Requires the fb-threads binary to be built.
+    """
+    if not _FB_THREADS_BINARY.exists():
+        return []
+
+    try:
+        result = subprocess.run(
+            [
+                str(_FB_THREADS_BINARY),
+                str(COOKIES_PATH),
+                str(max_pages),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            print(result.stderr, file=sys.stderr)
             return []
         return json.loads(result.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
@@ -392,7 +421,12 @@ def _get_session() -> MessengerSession:
 # ---------------------------------------------------------------------------
 
 def recent_chats(limit: int = 20) -> list[dict]:
-    """List recent Messenger conversations."""
+    """List recent Messenger conversations.
+
+    Uses the initial Lightspeed sync for small limits. If the limit exceeds
+    the initial sync (~15 threads) and fb-threads is available, uses MQTT
+    pagination to fetch more.
+    """
     sess = _get_session()
     payload = sess._fetch_inbox()
     threads, users, _messages = _parse_inbox(payload, sess._my_user_id)
@@ -413,25 +447,106 @@ def recent_chats(limit: int = 20) -> list[dict]:
             "is_group": thread["is_group"],
         })
 
+    # If we need more threads than the initial sync provided, use MQTT pagination
+    if len(results) < limit and _FB_THREADS_BINARY.exists():
+        seen = {r["thread_id"] for r in results}
+        mqtt_threads = _fetch_all_threads()
+        for t in sorted(mqtt_threads, key=lambda x: x["last_activity_ms"], reverse=True):
+            if len(results) >= limit:
+                break
+            tid = str(t["thread_id"])
+            if tid in seen:
+                continue
+            seen.add(tid)
+            results.append({
+                "name": t["name"] or tid,
+                "thread_id": tid,
+                "last_message": _ts_to_datetime(t["last_activity_ms"]),
+                "is_group": t["thread_type"] != 1,
+            })
+
+    return results
+
+
+def all_threads() -> list[dict]:
+    """Fetch all Messenger threads via MQTT pagination.
+
+    Returns all discoverable threads, not just the ~15 from the initial sync.
+    Requires fb-threads binary to be built.
+    """
+    # Start with the inbox sync threads
+    sess = _get_session()
+    payload = sess._fetch_inbox()
+    threads, users, _messages = _parse_inbox(payload, sess._my_user_id)
+
+    results = []
+    seen = set()
+    for thread_id, thread in threads.items():
+        name = thread["name"] or users.get(thread_id, str(thread_id))
+        seen.add(str(thread_id))
+        results.append({
+            "name": name,
+            "thread_id": str(thread_id),
+            "last_message": _ts_to_datetime(thread["last_sent_ts"]),
+            "is_group": thread["is_group"],
+        })
+
+    # Extend with MQTT pagination
+    if _FB_THREADS_BINARY.exists():
+        mqtt_threads = _fetch_all_threads(max_pages=0)
+        for t in mqtt_threads:
+            tid = str(t["thread_id"])
+            if tid in seen:
+                continue
+            seen.add(tid)
+            results.append({
+                "name": t["name"] or tid,
+                "thread_id": tid,
+                "last_message": _ts_to_datetime(t["last_activity_ms"]),
+                "is_group": t["thread_type"] != 1,
+            })
+
+    results.sort(key=lambda x: x["last_message"], reverse=True)
     return results
 
 
 def find_chats(query: str) -> list[dict]:
-    """Find Messenger chats by name."""
+    """Find Messenger chats by name.
+
+    Searches across all threads (using MQTT pagination if fb-threads is available).
+    """
     query_lower = query.lower()
     sess = _get_session()
     payload = sess._fetch_inbox()
     threads, users, _messages = _parse_inbox(payload, sess._my_user_id)
 
     results = []
+    seen = set()
     for thread_id, thread in threads.items():
         name = thread["name"] or users.get(thread_id, str(thread_id))
         if name and query_lower in name.lower():
+            seen.add(str(thread_id))
             results.append({
                 "name": name,
                 "thread_id": str(thread_id),
                 "is_group": thread["is_group"],
             })
+
+    # Also search MQTT-paginated threads if available and no results found
+    if not results and _FB_THREADS_BINARY.exists():
+        mqtt_threads = _fetch_all_threads()
+        for t in mqtt_threads:
+            tid = str(t["thread_id"])
+            name = t["name"] or ""
+            if tid in seen:
+                continue
+            if name and query_lower in name.lower():
+                seen.add(tid)
+                results.append({
+                    "name": name,
+                    "thread_id": tid,
+                    "is_group": t["thread_type"] != 1,
+                })
 
     return results
 
