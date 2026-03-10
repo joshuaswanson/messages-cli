@@ -4,8 +4,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Session store (shared with wa-media-tool and whatsapp-cli)
-SESSION_DIR = Path.home() / ".whatsapp-cli"
+from .utils import WHATSAPP_SESSION_DIR
+
+SESSION_DIR = WHATSAPP_SESSION_DIR
 
 # The wa-send binary lives next to wa-media-tool in the project
 _WA_SEND_BIN = Path(__file__).parent.parent / "wa-send-tool" / "wa-send"

@@ -17,6 +17,8 @@ from pathlib import Path
 
 import requests
 
+from .utils import format_ts_ms
+
 COOKIES_PATH = Path.home() / ".config/messages-cli/messenger_cookies.json"
 _IMAGE_CACHE_DIR = Path.home() / ".cache/messages-cli/messenger"
 
@@ -395,15 +397,7 @@ def _parse_inbox(payload: dict, my_user_id: int | None = None) -> tuple[dict, di
     return threads, users, messages
 
 
-def _ts_to_datetime(ts: int | None) -> str:
-    """Convert Facebook timestamp (ms) to ISO 8601 with local timezone."""
-    if ts is None:
-        return ""
-    try:
-        dt = datetime.datetime.fromtimestamp(ts / 1000).astimezone()
-        return dt.isoformat()
-    except (ValueError, OSError):
-        return ""
+_ts_to_datetime = format_ts_ms
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +696,7 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
             "timestamp": _ts_to_datetime(m["timestamp"]),
             "sender": sender,
             "text": text,
+            "edited": False,
             "is_from_me": is_from_me,
             "image_paths": image_paths,
         })

@@ -3,8 +3,9 @@
 import re
 import sqlite3
 import sys
-from datetime import datetime
 from pathlib import Path
+
+from .utils import format_ts
 
 # WhatsApp Desktop stores data in Group Containers
 _WA_CONTAINER = Path.home() / "Library/Group Containers/group.net.whatsapp.WhatsApp.shared"
@@ -51,13 +52,6 @@ def _connect_contacts_db() -> sqlite3.Connection | None:
 def _ts_expr(col: str = "m.ZMESSAGEDATE") -> str:
     """SQL expression to convert WhatsApp CoreData timestamp to unix seconds."""
     return f'CAST({col} + {COREDATA_EPOCH} AS INTEGER)'
-
-
-def _format_ts(unix_ts: int | float | None) -> str:
-    """Format unix timestamp as ISO 8601 with local timezone."""
-    if unix_ts is None:
-        return ""
-    return datetime.fromtimestamp(unix_ts).astimezone().isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +178,7 @@ def recent_chats(limit: int = 20) -> list[dict]:
         results.append({
             "name": name,
             "jid": jid,
-            "last_message": _format_ts(rd["last_msg"]),
+            "last_message": format_ts(rd["last_msg"]),
             "phone": phone,
             "is_group": jid.endswith("@g.us"),
             "message_count": rd.get("message_count", 0),
@@ -376,9 +370,10 @@ def read_messages(jid: str, limit: int = 20) -> list[dict]:
                 image_paths.append(str(full_path))
 
         messages.append({
-            "timestamp": _format_ts(r["timestamp"]),
+            "timestamp": format_ts(r["timestamp"]),
             "sender": sender,
             "text": text,
+            "edited": False,
             "is_from_me": bool(r["ZISFROMME"]),
             "image_paths": image_paths,
         })
@@ -425,7 +420,7 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
                 sender = _resolve_sender(from_jid, push_name, False, contact_cache)
 
         results.append({
-            "timestamp": _format_ts(rd["timestamp"]),
+            "timestamp": format_ts(rd["timestamp"]),
             "chat_name": chat_name,
             "sender": sender,
             "text": rd["ZTEXT"],

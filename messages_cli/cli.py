@@ -3,9 +3,9 @@
 from datetime import datetime as _datetime
 
 import click
-import phonenumbers
 
 from . import db, send, backends, whatsapp_auth, messenger_auth
+from .utils import format_phone
 
 # Colors
 DIM = "bright_black"
@@ -23,17 +23,6 @@ PLATFORM_TAGS = {
 }
 
 VALID_PLATFORMS = ("messages", "telegram", "whatsapp", "messenger")
-
-
-def _format_phone(value: str) -> str:
-    """Format a phone number nicely based on country code."""
-    try:
-        parsed = phonenumbers.parse(value)
-        return phonenumbers.format_number(
-            parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL
-        )
-    except phonenumbers.NumberParseException:
-        return value
 
 
 def _truncate(text: str, full: bool) -> str:
@@ -80,7 +69,7 @@ def platform_option(fn):
 def _format_message(m: dict, full: bool) -> str:
     ts = click.style(_display_ts(m["timestamp"]), fg=DIM)
     is_me = m["sender"] == "Me"
-    sender_text = m["sender"] if is_me else _format_phone(m["sender"])
+    sender_text = m["sender"] if is_me else format_phone(m["sender"])
     sender = click.style(sender_text, fg=SENDER_ME if is_me else SENDER_OTHER)
     if m.get("edited"):
         sender += click.style(" [edited]", fg=EDITED)
@@ -143,7 +132,7 @@ def contacts_search(name: str):
         name_str = click.style(f"{first} {last}".strip(), bold=True)
         click.echo(name_str)
         for phone in c["phones"]:
-            click.echo(f"  {click.style('phone:', fg=DIM)} {_format_phone(phone)}")
+            click.echo(f"  {click.style('phone:', fg=DIM)} {format_phone(phone)}")
         for email in c["emails"]:
             click.echo(f"  {click.style('email:', fg=DIM)} {email}")
 
@@ -245,7 +234,7 @@ def search_cmd(query: str, limit: int, full: bool, platform: str | None):
     for r in results:
         ts = click.style(_display_ts(r["timestamp"]), fg=DIM)
         chat = click.style(r["chat_name"], fg=SENDER_OTHER)
-        sender_text = r["sender"] if r["sender"] == "Me" else _format_phone(r["sender"])
+        sender_text = r["sender"] if r["sender"] == "Me" else format_phone(r["sender"])
         sender = click.style(sender_text, fg=SENDER_ME if r["sender"] == "Me" else SENDER_OTHER)
         text = _truncate(r["text"], full)
         tag = f"  {_platform_tag(r['platform'])}" if show_tags else ""
@@ -266,7 +255,7 @@ def send_cmd(recipient: str, message: str, confirm: bool, platform: str | None):
         plat, display = backends.resolve_send_target(recipient, platform)
         tag = _platform_tag(plat)
         if plat == "messages":
-            display = _format_phone(display)
+            display = format_phone(display)
         click.echo(f"Would send {tag} to {click.style(display, fg=SENDER_OTHER)}: {message}")
         click.echo(f"Pass {click.style('--confirm', bold=True)} to actually send.")
         return

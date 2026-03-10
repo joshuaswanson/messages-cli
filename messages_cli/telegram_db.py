@@ -20,8 +20,9 @@ import struct
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
 from pathlib import Path
+
+from .utils import format_ts
 
 import mmh3
 from Crypto.Cipher import AES
@@ -774,7 +775,7 @@ class TelegramDB:
         for peer_id, last_ts in sorted_peers:
             peer = self._get_peer(peer_id)
             name = _peer_display_name(peer)
-            ts = datetime.fromtimestamp(last_ts).astimezone().isoformat()
+            ts = format_ts(last_ts)
             chats.append({
                 "peer_id": peer_id,
                 "name": name,
@@ -886,7 +887,7 @@ class TelegramDB:
             else:
                 sender = "Me"
 
-            ts = datetime.fromtimestamp(idx["timestamp"]).astimezone().isoformat()
+            ts = format_ts(idx["timestamp"])
 
             messages.append({
                 "timestamp": ts,
@@ -932,7 +933,7 @@ class TelegramDB:
             else:
                 sender = "Me"
 
-            ts = datetime.fromtimestamp(idx["timestamp"]).astimezone().isoformat()
+            ts = format_ts(idx["timestamp"])
 
             results.append({
                 "timestamp": ts,

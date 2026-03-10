@@ -3,8 +3,9 @@
 import re
 import sqlite3
 import sys
-from datetime import datetime
 from pathlib import Path
+
+from .utils import format_ts
 
 MESSAGES_DB = Path.home() / "Library" / "Messages" / "chat.db"
 CONTACTS_DIR = Path.home() / "Library" / "Application Support" / "AddressBook" / "Sources"
@@ -16,13 +17,6 @@ COREDATA_EPOCH = 978307200
 def _ts_expr(col: str = "m.date") -> str:
     """SQL expression to convert Apple nanosecond timestamp to unix seconds."""
     return f'CAST({col}/1000000000 + {COREDATA_EPOCH} AS INTEGER)'
-
-
-def _format_ts(unix_ts: int | float | None) -> str:
-    """Format unix timestamp as ISO 8601 with local timezone."""
-    if unix_ts is None:
-        return ""
-    return datetime.fromtimestamp(unix_ts).astimezone().isoformat()
 
 
 def _connect_messages() -> sqlite3.Connection:
@@ -201,7 +195,7 @@ def recent_chats(limit: int = 20) -> list[dict]:
     return [{
         "chat_identifier": r["chat_identifier"],
         "display_name": r["display_name"],
-        "last_msg": _format_ts(r["last_ts"]),
+        "last_message": format_ts(r["last_ts"]),
         "message_count": r["message_count"],
     } for r in rows]
 
@@ -399,7 +393,7 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
         edited = r["date_edited"] and r["date_edited"] > 0
         messages.append(
             {
-                "timestamp": _format_ts(r["timestamp"]),
+                "timestamp": format_ts(r["timestamp"]),
                 "sender": sender,
                 "text": content,
                 "edited": edited,
@@ -433,7 +427,7 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
     ).fetchall()
     conn.close()
     return [{
-        "timestamp": _format_ts(r["timestamp"]),
+        "timestamp": format_ts(r["timestamp"]),
         "chat_identifier": r["chat_identifier"],
         "display_name": r["display_name"],
         "sender": r["sender"],

@@ -4,8 +4,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .utils import WHATSAPP_SESSION_DIR
+
 _WA_AUTH_BIN = Path(__file__).parent.parent / "wa-auth-tool" / "wa-auth"
-SESSION_DIR = Path.home() / ".whatsapp-cli"
+SESSION_DIR = WHATSAPP_SESSION_DIR
 
 
 def run_auth() -> None:
