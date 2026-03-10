@@ -1,5 +1,7 @@
 """CLI entry point for messages-cli."""
 
+from datetime import datetime as _datetime
+
 import click
 import phonenumbers
 
@@ -51,6 +53,15 @@ def _platform_tag(platform: str) -> str:
     return click.style(f"[{tag}]", fg=DIM)
 
 
+def _display_ts(ts: str) -> str:
+    """Format ISO 8601 timestamp for CLI display."""
+    try:
+        dt = _datetime.fromisoformat(ts)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return ts
+
+
 def _validate_platform(ctx, param, value):
     if value is not None and value not in VALID_PLATFORMS:
         raise click.BadParameter(f"must be one of: {', '.join(VALID_PLATFORMS)}")
@@ -67,7 +78,7 @@ def platform_option(fn):
 
 
 def _format_message(m: dict, full: bool) -> str:
-    ts = click.style(m["timestamp"], fg=DIM)
+    ts = click.style(_display_ts(m["timestamp"]), fg=DIM)
     is_me = m["sender"] == "Me"
     sender_text = m["sender"] if is_me else _format_phone(m["sender"])
     sender = click.style(sender_text, fg=SENDER_ME if is_me else SENDER_OTHER)
@@ -158,7 +169,7 @@ def chats_recent(limit: int, platform: str | None):
     name_width = max(len(r["name"]) for r in rows)
     for r in rows:
         name_col = click.style(r["name"].ljust(name_width), bold=True)
-        ts_col = click.style(r["last_message"], fg=DIM)
+        ts_col = click.style(_display_ts(r["last_message"]), fg=DIM)
         extras = []
         if show_tags:
             extras.append(_platform_tag(r["platform"]))
@@ -232,7 +243,7 @@ def search_cmd(query: str, limit: int, full: bool, platform: str | None):
         return
     show_tags = platform is None
     for r in results:
-        ts = click.style(r["timestamp"], fg=DIM)
+        ts = click.style(_display_ts(r["timestamp"]), fg=DIM)
         chat = click.style(r["chat_name"], fg=SENDER_OTHER)
         sender_text = r["sender"] if r["sender"] == "Me" else _format_phone(r["sender"])
         sender = click.style(sender_text, fg=SENDER_ME if r["sender"] == "Me" else SENDER_OTHER)

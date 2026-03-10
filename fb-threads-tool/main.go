@@ -470,8 +470,15 @@ func main() {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Total: %d threads fetched\n", len(allThreads))
-	out, _ := json.Marshal(allThreads)
+	// Determine if pagination was truncated (hit max_pages before exhausting)
+	hasMore := (maxPages > 0 && !sg1Done) || (maxPages > 0 && !sg95Done)
+
+	fmt.Fprintf(os.Stderr, "Total: %d threads fetched (has_more=%v)\n", len(allThreads), hasMore)
+	output := struct {
+		Threads []OutputThread `json:"threads"`
+		HasMore bool           `json:"has_more"`
+	}{allThreads, hasMore}
+	out, _ := json.Marshal(output)
 	fmt.Println(string(out))
 }
 

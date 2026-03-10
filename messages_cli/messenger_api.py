@@ -215,15 +215,16 @@ def _fetch_older_messages(thread_id: int, ref_timestamp_ms: int,
         return []
 
 
-def _fetch_all_threads(max_pages: int = 100, e2ee: bool = True) -> list[dict]:
+def _fetch_all_threads(max_pages: int = 100, e2ee: bool = True) -> tuple[list[dict], bool]:
     """Fetch all Messenger threads via fb-threads-tool (MQTT WebSocket).
 
-    Returns a list of {"thread_id", "name", "last_activity_ms", "snippet", "thread_type"} dicts.
+    Returns (threads, has_more) where threads is a list of
+    {"thread_id", "name", "last_activity_ms", "snippet", "thread_type"} dicts.
     Requires the fb-threads binary to be built.
     With e2ee=True, also fetches E2EE encrypted threads (requires go-sqlite3).
     """
     if not _FB_THREADS_BINARY.exists():
-        return []
+        return [], False
 
     cmd = [str(_FB_THREADS_BINARY), str(COOKIES_PATH), str(max_pages)]
     if e2ee:
@@ -238,10 +239,13 @@ def _fetch_all_threads(max_pages: int = 100, e2ee: bool = True) -> list[dict]:
         )
         if result.returncode != 0:
             print(result.stderr, file=sys.stderr)
-            return []
-        return json.loads(result.stdout)
+            return [], False
+        data = json.loads(result.stdout)
+        if isinstance(data, dict):
+            return data.get("threads", []), data.get("has_more", False)
+        return data, False
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
-        return []
+        return [], False
 
 
 def _download_images(urls: list[str], session: requests.Session | None = None) -> dict[str, str]:
@@ -392,12 +396,12 @@ def _parse_inbox(payload: dict, my_user_id: int | None = None) -> tuple[dict, di
 
 
 def _ts_to_datetime(ts: int | None) -> str:
-    """Convert Facebook timestamp (ms) to datetime string."""
+    """Convert Facebook timestamp (ms) to ISO 8601 with local timezone."""
     if ts is None:
         return ""
     try:
-        dt = datetime.datetime.fromtimestamp(ts / 1000)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        dt = datetime.datetime.fromtimestamp(ts / 1000).astimezone()
+        return dt.isoformat()
     except (ValueError, OSError):
         return ""
 
@@ -451,7 +455,7 @@ def recent_chats(limit: int = 20) -> list[dict]:
     # If we need more threads than the initial sync provided, use MQTT pagination
     if len(results) < limit and _FB_THREADS_BINARY.exists():
         seen = {r["thread_id"] for r in results}
-        mqtt_threads = _fetch_all_threads()
+        mqtt_threads, _ = _fetch_all_threads()
         for t in sorted(mqtt_threads, key=lambda x: x["last_activity_ms"], reverse=True):
             if len(results) >= limit:
                 break
@@ -469,10 +473,11 @@ def recent_chats(limit: int = 20) -> list[dict]:
     return results
 
 
-def all_threads() -> list[dict]:
+def all_threads() -> dict:
     """Fetch all Messenger threads via MQTT pagination.
 
-    Returns all discoverable threads, not just the ~15 from the initial sync.
+    Returns {"threads": [...], "has_more": bool} where threads is a list of
+    discoverable threads, not just the ~15 from the initial sync.
     Requires fb-threads binary to be built.
     """
     # Start with the inbox sync threads
@@ -493,8 +498,9 @@ def all_threads() -> list[dict]:
         })
 
     # Extend with MQTT pagination
+    has_more = False
     if _FB_THREADS_BINARY.exists():
-        mqtt_threads = _fetch_all_threads(max_pages=0)
+        mqtt_threads, has_more = _fetch_all_threads(max_pages=0)
         for t in mqtt_threads:
             tid = str(t["thread_id"])
             if tid in seen:
@@ -508,7 +514,7 @@ def all_threads() -> list[dict]:
             })
 
     results.sort(key=lambda x: x["last_message"], reverse=True)
-    return results
+    return {"threads": results, "has_more": has_more}
 
 
 def find_chats(query: str) -> list[dict]:
@@ -535,7 +541,7 @@ def find_chats(query: str) -> list[dict]:
 
     # Also search MQTT-paginated threads if available and no results found
     if not results and _FB_THREADS_BINARY.exists():
-        mqtt_threads = _fetch_all_threads()
+        mqtt_threads, _ = _fetch_all_threads()
         for t in mqtt_threads:
             tid = str(t["thread_id"])
             name = t["name"] or users.get(t["thread_id"], users.get(tid, ""))
@@ -680,7 +686,8 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
     results = []
     for m in messages[:limit]:
         author_id = m["author_id"]
-        if author_id == my_user_id:
+        is_from_me = author_id == my_user_id
+        if is_from_me:
             sender = "Me"
         else:
             sender = users.get(author_id, str(author_id) if author_id else "Unknown")
@@ -695,6 +702,7 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
             "timestamp": _ts_to_datetime(m["timestamp"]),
             "sender": sender,
             "text": text,
+            "is_from_me": is_from_me,
             "image_paths": image_paths,
         })
 
@@ -723,7 +731,8 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
         chat_name = thread.get("name") or users.get(tid, str(tid))
 
         author_id = m["author_id"]
-        if author_id == my_user_id:
+        is_from_me = author_id == my_user_id
+        if is_from_me:
             sender = "Me"
         else:
             sender = users.get(author_id, str(author_id) if author_id else "Unknown")
@@ -733,6 +742,7 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
             "chat_name": chat_name,
             "sender": sender,
             "text": m["text"],
+            "is_from_me": is_from_me,
         })
 
     results.sort(key=lambda x: x["timestamp"], reverse=True)

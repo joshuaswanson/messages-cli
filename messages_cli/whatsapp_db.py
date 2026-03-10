@@ -3,6 +3,7 @@
 import re
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # WhatsApp Desktop stores data in Group Containers
@@ -48,8 +49,15 @@ def _connect_contacts_db() -> sqlite3.Connection | None:
 
 
 def _ts_expr(col: str = "m.ZMESSAGEDATE") -> str:
-    """SQL expression to convert WhatsApp CoreData timestamp to local datetime."""
-    return f'datetime({col} + {COREDATA_EPOCH}, "unixepoch", "localtime")'
+    """SQL expression to convert WhatsApp CoreData timestamp to unix seconds."""
+    return f'CAST({col} + {COREDATA_EPOCH} AS INTEGER)'
+
+
+def _format_ts(unix_ts: int | float | None) -> str:
+    """Format unix timestamp as ISO 8601 with local timezone."""
+    if unix_ts is None:
+        return ""
+    return datetime.fromtimestamp(unix_ts).astimezone().isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -153,12 +161,13 @@ def recent_chats(limit: int = 20) -> list[dict]:
     jid_to_phone = _build_jid_to_phone()
     rows = conn.execute(
         f"""
-        SELECT ZCONTACTJID, ZPARTNERNAME, ZLASTMESSAGETEXT,
-               {_ts_expr('ZLASTMESSAGEDATE')} as last_msg,
-               ZSESSIONTYPE
-        FROM ZWACHATSESSION
-        WHERE ZREMOVED = 0 AND ZHIDDEN = 0
-        ORDER BY ZLASTMESSAGEDATE DESC
+        SELECT c.ZCONTACTJID, c.ZPARTNERNAME, c.ZLASTMESSAGETEXT,
+               {_ts_expr('c.ZLASTMESSAGEDATE')} as last_msg,
+               c.ZSESSIONTYPE,
+               (SELECT COUNT(*) FROM ZWAMESSAGE m WHERE m.ZCHATSESSION = c.Z_PK) as message_count
+        FROM ZWACHATSESSION c
+        WHERE c.ZREMOVED = 0 AND c.ZHIDDEN = 0
+        ORDER BY c.ZLASTMESSAGEDATE DESC
         LIMIT ?
         """,
         (limit,),
@@ -175,9 +184,10 @@ def recent_chats(limit: int = 20) -> list[dict]:
         results.append({
             "name": name,
             "jid": jid,
-            "last_message": rd["last_msg"],
+            "last_message": _format_ts(rd["last_msg"]),
             "phone": phone,
             "is_group": jid.endswith("@g.us"),
+            "message_count": rd.get("message_count", 0),
         })
     return results
 
@@ -366,9 +376,10 @@ def read_messages(jid: str, limit: int = 20) -> list[dict]:
                 image_paths.append(str(full_path))
 
         messages.append({
-            "timestamp": r["timestamp"],
+            "timestamp": _format_ts(r["timestamp"]),
             "sender": sender,
             "text": text,
+            "is_from_me": bool(r["ZISFROMME"]),
             "image_paths": image_paths,
         })
     return messages
@@ -414,10 +425,11 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
                 sender = _resolve_sender(from_jid, push_name, False, contact_cache)
 
         results.append({
-            "timestamp": rd["timestamp"],
+            "timestamp": _format_ts(rd["timestamp"]),
             "chat_name": chat_name,
             "sender": sender,
             "text": rd["ZTEXT"],
+            "is_from_me": bool(rd["ZISFROMME"]),
         })
     return results
 

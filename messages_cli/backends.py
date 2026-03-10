@@ -116,6 +116,7 @@ def recent_chats(limit: int, platform: str | None = None) -> list[dict]:
                 "last_message": r["last_msg"],
                 "phone": _format_phone(r["chat_identifier"]) if not r["chat_identifier"].startswith("chat") else "",
                 "username": "",
+                "message_count": r.get("message_count"),
             })
 
     if _want(platform, "telegram"):
@@ -129,6 +130,7 @@ def recent_chats(limit: int, platform: str | None = None) -> list[dict]:
                 "last_message": c["last_message"],
                 "phone": _format_phone(c["phone"]) if c.get("phone") else "",
                 "username": c.get("username", ""),
+                "message_count": c.get("message_count"),
             })
 
     if _want(platform, "whatsapp"):
@@ -141,6 +143,7 @@ def recent_chats(limit: int, platform: str | None = None) -> list[dict]:
                 "last_message": c["last_message"],
                 "phone": _format_phone(c["phone"]) if c.get("phone") else "",
                 "username": "",
+                "message_count": c.get("message_count"),
             })
 
     if _want(platform, "messenger"):
@@ -153,6 +156,7 @@ def recent_chats(limit: int, platform: str | None = None) -> list[dict]:
                 "last_message": c["last_message"],
                 "phone": "",
                 "username": "",
+                "message_count": c.get("message_count"),
             })
 
     # Sort by last_message descending and take top limit
@@ -308,6 +312,7 @@ def search_messages(
                 "chat_name": chat_name,
                 "sender": sender,
                 "text": r["text"],
+                "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
                 "platform": "messages",
             })
 
@@ -320,6 +325,7 @@ def search_messages(
                 "chat_name": r["chat_name"],
                 "sender": r["sender"],
                 "text": r["text"],
+                "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
                 "platform": "telegram",
             })
 
@@ -331,6 +337,7 @@ def search_messages(
                 "chat_name": r["chat_name"],
                 "sender": r["sender"],
                 "text": r["text"],
+                "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
                 "platform": "whatsapp",
             })
 
@@ -342,6 +349,7 @@ def search_messages(
                 "chat_name": r["chat_name"],
                 "sender": r["sender"],
                 "text": r["text"],
+                "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
                 "platform": "messenger",
             })
 

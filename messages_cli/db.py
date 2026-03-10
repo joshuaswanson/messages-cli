@@ -3,6 +3,7 @@
 import re
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 MESSAGES_DB = Path.home() / "Library" / "Messages" / "chat.db"
@@ -13,8 +14,15 @@ COREDATA_EPOCH = 978307200
 
 
 def _ts_expr(col: str = "m.date") -> str:
-    """SQL expression to convert Apple nanosecond timestamp to local datetime."""
-    return f'datetime({col}/1000000000 + {COREDATA_EPOCH}, "unixepoch", "localtime")'
+    """SQL expression to convert Apple nanosecond timestamp to unix seconds."""
+    return f'CAST({col}/1000000000 + {COREDATA_EPOCH} AS INTEGER)'
+
+
+def _format_ts(unix_ts: int | float | None) -> str:
+    """Format unix timestamp as ISO 8601 with local timezone."""
+    if unix_ts is None:
+        return ""
+    return datetime.fromtimestamp(unix_ts).astimezone().isoformat()
 
 
 def _connect_messages() -> sqlite3.Connection:
@@ -178,7 +186,8 @@ def recent_chats(limit: int = 20) -> list[dict]:
     rows = conn.execute(
         f"""
         SELECT c.chat_identifier, c.display_name,
-               {_ts_expr('MAX(m.date)')} as last_msg
+               {_ts_expr('MAX(m.date)')} as last_ts,
+               COUNT(m.ROWID) as message_count
         FROM chat c
         JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
         JOIN message m ON cmj.message_id = m.ROWID
@@ -189,7 +198,12 @@ def recent_chats(limit: int = 20) -> list[dict]:
         (limit,),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [{
+        "chat_identifier": r["chat_identifier"],
+        "display_name": r["display_name"],
+        "last_msg": _format_ts(r["last_ts"]),
+        "message_count": r["message_count"],
+    } for r in rows]
 
 
 def find_chats(identifier: str) -> list[dict]:
@@ -376,7 +390,8 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
             if not content:
                 continue
 
-        if r["is_from_me"]:
+        is_from_me = bool(r["is_from_me"])
+        if is_from_me:
             sender = "Me"
         else:
             handle = r["handle"] or "Unknown"
@@ -384,10 +399,11 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
         edited = r["date_edited"] and r["date_edited"] > 0
         messages.append(
             {
-                "timestamp": r["timestamp"],
+                "timestamp": _format_ts(r["timestamp"]),
                 "sender": sender,
                 "text": content,
                 "edited": edited,
+                "is_from_me": is_from_me,
                 "image_paths": image_paths_map.get(r["message_id"], []),
             }
         )
@@ -403,6 +419,7 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
                c.chat_identifier,
                c.display_name,
                CASE WHEN m.is_from_me = 1 THEN 'Me' ELSE h.id END as sender,
+               m.is_from_me,
                m.text
         FROM message m
         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
@@ -415,4 +432,11 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
         (f"%{query}%", limit),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [{
+        "timestamp": _format_ts(r["timestamp"]),
+        "chat_identifier": r["chat_identifier"],
+        "display_name": r["display_name"],
+        "sender": r["sender"],
+        "is_from_me": bool(r["is_from_me"]),
+        "text": r["text"],
+    } for r in rows]

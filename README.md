@@ -169,6 +169,14 @@ messenger   Messages: 1,204   Chats: 31
 
 **Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. Two Go binaries (using mautrix-meta) connect via Facebook's MQTT WebSocket protocol for pagination: fb-fetch pages through older messages within a thread, and fb-threads pages through the thread list itself (the initial Lightspeed sync only returns ~15 recent threads). fb-threads also registers an E2EE device via Facebook's ICDC protocol (Signal Protocol key exchange) to access end-to-end encrypted threads, which Facebook migrated most conversations to in 2023. E2EE 1-on-1 DMs are discovered by intercepting Lightspeed `createOpenToE2EEThreadLink` entries, and contact names are resolved via `GetContactsFullTask` over MQTT. Device keys are persisted locally in a SQLite database. Sends messages via Facebook's Lightspeed GraphQL API. Image attachments are downloaded from Facebook's CDN to `~/.cache/messages-cli/messenger/`.
 
-### Image paths
+### Data format
 
-All platforms return an `image_paths` field in message dicts containing local file paths to image attachments. This enables downstream tools (like training data pipelines) to access images uniformly across platforms.
+Message dicts from `read_messages()` include:
+
+- `timestamp` -- ISO 8601 with local timezone (e.g., `2026-03-10T11:09:49+01:00`)
+- `sender` -- display name or `"Me"`
+- `text` -- message content with attachment tags
+- `is_from_me` -- boolean
+- `image_paths` -- list of local file paths to image attachments
+
+Chat/thread dicts from `recent_chats()` include `message_count` (per-thread message count) on iMessage, WhatsApp, and Telegram. Messenger's `all_threads()` returns `{"threads": [...], "has_more": bool}` indicating whether pagination was exhaustive.

@@ -756,14 +756,16 @@ class TelegramDB:
 
         rows = self._conn.execute("SELECT key FROM t7").fetchall()
 
-        # Find the most recent timestamp per peer
+        # Find the most recent timestamp and message count per peer
         peer_latest: dict[int, int] = {}
+        peer_count: dict[int, int] = {}
         for (key,) in rows:
             parsed = _parse_message_key(key)
             pid = parsed["peer_id"]
             ts = parsed["timestamp"]
             if pid not in peer_latest or ts > peer_latest[pid]:
                 peer_latest[pid] = ts
+            peer_count[pid] = peer_count.get(pid, 0) + 1
 
         # Sort by most recent timestamp
         sorted_peers = sorted(peer_latest.items(), key=lambda x: x[1], reverse=True)[:limit]
@@ -772,13 +774,14 @@ class TelegramDB:
         for peer_id, last_ts in sorted_peers:
             peer = self._get_peer(peer_id)
             name = _peer_display_name(peer)
-            ts = datetime.fromtimestamp(last_ts).strftime("%Y-%m-%d %H:%M:%S")
+            ts = datetime.fromtimestamp(last_ts).astimezone().isoformat()
             chats.append({
                 "peer_id": peer_id,
                 "name": name,
                 "username": peer.get("username", ""),
                 "phone": peer.get("phone", ""),
                 "last_message": ts,
+                "message_count": peer_count.get(peer_id, 0),
             })
 
         return chats
@@ -883,13 +886,14 @@ class TelegramDB:
             else:
                 sender = "Me"
 
-            ts = datetime.fromtimestamp(idx["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+            ts = datetime.fromtimestamp(idx["timestamp"]).astimezone().isoformat()
 
             messages.append({
                 "timestamp": ts,
                 "sender": sender,
                 "text": text,
                 "edited": False,
+                "is_from_me": not msg["incoming"],
                 "peer_id": idx["peer_id"],
                 "message_id": idx["message_id"],
                 "image_paths": image_paths,
@@ -928,13 +932,14 @@ class TelegramDB:
             else:
                 sender = "Me"
 
-            ts = datetime.fromtimestamp(idx["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+            ts = datetime.fromtimestamp(idx["timestamp"]).astimezone().isoformat()
 
             results.append({
                 "timestamp": ts,
                 "chat_name": _peer_display_name(peer),
                 "sender": sender,
                 "text": msg["text"],
+                "is_from_me": not msg["incoming"],
                 "peer_id": idx["peer_id"],
             })
 
