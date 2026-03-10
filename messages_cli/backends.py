@@ -1,604 +1,503 @@
 """Platform-agnostic adapter layer for message databases.
 
-Queries iMessage and Telegram (and future platforms) through a unified interface.
-Each function accepts an optional platform filter; None means query all available.
+Each platform implements BackendAdapter. Dispatch functions query all available
+backends (or a specific one) through the registry.
 """
 
 from __future__ import annotations
 
 import asyncio
 import atexit
-import re
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 from . import db, send, telegram_send, whatsapp_db, whatsapp_send, messenger_api
-
-# Telegram container path (same as telegram_db.py)
-_TG_CONTAINER = Path.home() / "Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
-
-# Lazy TelegramDB singleton
-_telegram_db = None
-
-
-def _get_telegram_db():
-    global _telegram_db
-    if _telegram_db is None:
-        from .telegram_db import TelegramDB
-        _telegram_db = TelegramDB()
-        atexit.register(_telegram_db.close)
-    return _telegram_db
-
-
-def available_platforms() -> list[str]:
-    """Return list of platforms whose databases exist locally."""
-    platforms = []
-    if db.MESSAGES_DB.exists():
-        platforms.append("messages")
-    # Check for Telegram database without decrypting
-    for variant in ("appstore", ""):
-        base = _TG_CONTAINER / variant if variant else _TG_CONTAINER
-        for account_dir in base.glob("account-*"):
-            if (account_dir / "postbox/db/db_sqlite").exists():
-                platforms.append("telegram")
-                break
-        if "telegram" in platforms:
-            break
-    if whatsapp_db.is_available():
-        platforms.append("whatsapp")
-    if messenger_api.is_available():
-        platforms.append("messenger")
-    return platforms
-
-
-def _want(platform: str | None, name: str) -> bool:
-    """Check if a platform should be queried given the filter."""
-    if platform is None:
-        return name in available_platforms()
-    return platform == name
+from .utils import format_phone
 
 
 # ---------------------------------------------------------------------------
-# Name resolution helpers (moved from cli.py)
+# Backend adapter base
 # ---------------------------------------------------------------------------
 
-def _format_phone(value: str) -> str:
-    import phonenumbers
-    if not value:
-        return value
-    # Telegram stores phones without '+' prefix; add it for parsing
-    to_parse = value if value.startswith("+") else f"+{value}"
-    try:
-        parsed = phonenumbers.parse(to_parse)
-        return phonenumbers.format_number(
-            parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL
-        )
-    except phonenumbers.NumberParseException:
-        return value
+class BackendAdapter(ABC):
+    name: str
+    display_name: str
 
+    @abstractmethod
+    def is_available(self) -> bool: ...
 
-def _resolve_imessage_display_name(row: dict) -> str:
-    """Resolve an iMessage chat row to a human-readable name."""
-    cid = row["chat_identifier"]
-    if row["display_name"]:
-        return row["display_name"]
-    if cid.startswith("chat"):
-        conn = db._connect_messages()
-        participants = db._get_chat_participants(conn, cid)
-        conn.close()
-        if participants:
-            name = ", ".join(_format_phone(p) for p in participants[:3])
-            if len(participants) > 3:
-                name += f" +{len(participants) - 3}"
-            return name
-        return _format_phone(cid)
-    # Single handle -- resolve to contact name
-    handles = [cid]
-    cache = db._build_contact_cache(handles)
-    return cache.get(cid, "") or _format_phone(cid)
+    @abstractmethod
+    def recent_chats(self, limit: int) -> list[dict]: ...
+
+    @abstractmethod
+    def find_chats(self, query: str) -> list[dict]: ...
+
+    @abstractmethod
+    def has_chat(self, identifier: str) -> bool: ...
+
+    @abstractmethod
+    def read_messages(self, identifier: str, limit: int) -> list[dict]: ...
+
+    @abstractmethod
+    def search_messages(self, query: str, limit: int) -> list[dict]: ...
+
+    @abstractmethod
+    def stats(self) -> dict: ...
+
+    def can_send(self) -> bool:
+        return False
+
+    def _require_send(self) -> None:
+        if not self.can_send():
+            raise SystemExit(f"{self.display_name} send is not available.")
+
+    def send_message(self, identifier: str, text: str) -> str:
+        raise NotImplementedError
+
+    def resolve_display_name(self, identifier: str) -> str:
+        return identifier
 
 
 # ---------------------------------------------------------------------------
-# Unified functions
+# iMessage
 # ---------------------------------------------------------------------------
 
-def recent_chats(limit: int, platform: str | None = None) -> list[dict]:
-    """Recent chats across platforms, sorted by last_message descending."""
-    results = []
+class IMessageAdapter(BackendAdapter):
+    name = "messages"
+    display_name = "Messages"
 
-    if _want(platform, "messages"):
-        # Fetch more than limit so we can merge properly
-        rows = db.recent_chats(limit)
-        for r in rows:
-            results.append({
-                "name": _resolve_imessage_display_name(r),
-                "id": r["chat_identifier"],
-                "platform": "messages",
-                "last_message": r["last_msg"],
-                "phone": _format_phone(r["chat_identifier"]) if not r["chat_identifier"].startswith("chat") else "",
-                "username": "",
-                "message_count": r.get("message_count"),
-            })
+    def is_available(self) -> bool:
+        return db.MESSAGES_DB.exists()
 
-    if _want(platform, "telegram"):
-        tdb = _get_telegram_db()
-        chats = tdb.recent_chats(limit)
-        for c in chats:
-            results.append({
-                "name": c["name"],
-                "id": str(c["peer_id"]),
-                "platform": "telegram",
-                "last_message": c["last_message"],
-                "phone": _format_phone(c["phone"]) if c.get("phone") else "",
-                "username": c.get("username", ""),
-                "message_count": c.get("message_count"),
-            })
+    def _display_name_for_chat(self, row: dict) -> str:
+        cid = row["chat_identifier"]
+        if row["display_name"]:
+            return row["display_name"]
+        if cid.startswith("chat"):
+            conn = db._connect_messages()
+            participants = db._get_chat_participants(conn, cid)
+            conn.close()
+            if participants:
+                name = ", ".join(format_phone(p) for p in participants[:3])
+                if len(participants) > 3:
+                    name += f" +{len(participants) - 3}"
+                return name
+            return format_phone(cid)
+        cache = db._build_contact_cache([cid])
+        return cache.get(cid, "") or format_phone(cid)
 
-    if _want(platform, "whatsapp"):
-        chats = whatsapp_db.recent_chats(limit)
-        for c in chats:
-            results.append({
-                "name": c["name"],
-                "id": c["jid"],
-                "platform": "whatsapp",
-                "last_message": c["last_message"],
-                "phone": _format_phone(c["phone"]) if c.get("phone") else "",
-                "username": "",
-                "message_count": c.get("message_count"),
-            })
+    def recent_chats(self, limit: int) -> list[dict]:
+        return [{
+            "name": self._display_name_for_chat(r),
+            "id": r["chat_identifier"],
+            "platform": self.name,
+            "last_message": r["last_message"],
+            "phone": format_phone(r["chat_identifier"]) if not r["chat_identifier"].startswith("chat") else "",
+            "username": "",
+            "message_count": r.get("message_count"),
+        } for r in db.recent_chats(limit)]
 
-    if _want(platform, "messenger"):
-        chats = messenger_api.recent_chats(limit)
-        for c in chats:
-            results.append({
-                "name": c["name"],
-                "id": c["thread_id"],
-                "platform": "messenger",
-                "last_message": c["last_message"],
-                "phone": "",
-                "username": "",
-                "message_count": c.get("message_count"),
-            })
+    def find_chats(self, query: str) -> list[dict]:
+        return [{
+            "name": self._display_name_for_chat(r),
+            "id": r["chat_identifier"],
+            "platform": self.name,
+            "phone": format_phone(r["chat_identifier"]) if not r["chat_identifier"].startswith("chat") else "",
+            "username": "",
+        } for r in db.find_chats(query)]
 
-    # Sort by last_message descending and take top limit
-    results.sort(key=lambda x: x["last_message"], reverse=True)
-    return results[:limit]
+    def has_chat(self, identifier: str) -> bool:
+        if db.find_chats(identifier):
+            return True
+        return db.resolve_identifier(identifier) != identifier
 
-
-def find_chats(query: str, platform: str | None = None) -> list[dict]:
-    """Find chats by name, phone, or username across platforms."""
-    results = []
-
-    if _want(platform, "messages"):
-        rows = db.find_chats(query)
-        for r in rows:
-            results.append({
-                "name": _resolve_imessage_display_name(r),
-                "id": r["chat_identifier"],
-                "platform": "messages",
-                "phone": _format_phone(r["chat_identifier"]) if not r["chat_identifier"].startswith("chat") else "",
-                "username": "",
-            })
-
-    if _want(platform, "telegram"):
-        tdb = _get_telegram_db()
-        matches = tdb.find_chats(query)
-        for c in matches:
-            results.append({
-                "name": c["name"],
-                "id": str(c["peer_id"]),
-                "platform": "telegram",
-                "phone": _format_phone(c["phone"]) if c.get("phone") else "",
-                "username": c.get("username", ""),
-            })
-
-    if _want(platform, "whatsapp"):
-        matches = whatsapp_db.find_chats(query)
-        for c in matches:
-            results.append({
-                "name": c["name"],
-                "id": c["jid"],
-                "platform": "whatsapp",
-                "phone": _format_phone(c["phone"]) if c.get("phone") else "",
-                "username": "",
-            })
-
-    if _want(platform, "messenger"):
-        matches = messenger_api.find_chats(query)
-        for c in matches:
-            results.append({
-                "name": c["name"],
-                "id": c["thread_id"],
-                "platform": "messenger",
-                "phone": "",
-                "username": "",
-            })
-
-    return results
-
-
-def read_messages(
-    identifier: str, limit: int, platform: str | None = None
-) -> list[dict]:
-    """Read messages from a chat, auto-detecting platform if not specified."""
-    if platform == "messages":
-        # find_chats handles name->phone->chat_identifier resolution properly
+    def read_messages(self, identifier: str, limit: int) -> list[dict]:
         chats = db.find_chats(identifier)
         if chats:
             return db.read_messages(chats[0]["chat_identifier"], limit)
-        # Fall back to resolve_identifier for direct chat IDs
-        chat_id = db.resolve_identifier(identifier)
-        return db.read_messages(chat_id, limit)
+        return db.read_messages(db.resolve_identifier(identifier), limit)
 
-    if platform == "telegram":
-        tdb = _get_telegram_db()
-        peer_id = tdb.resolve_identifier(identifier)
+    def search_messages(self, query: str, limit: int) -> list[dict]:
+        return [{
+            "timestamp": r["timestamp"],
+            "chat_name": r["display_name"] or format_phone(r["chat_identifier"]),
+            "sender": r["sender"] if r["sender"] == "Me" else format_phone(r["sender"]),
+            "text": r["text"],
+            "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
+            "platform": self.name,
+        } for r in db.search_messages(query, limit)]
+
+    def stats(self) -> dict:
+        conn = db._connect_messages()
+        msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+        chat_count = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0]
+        conn.close()
+        return {"platform": self.name, "messages": msg_count, "chats": chat_count}
+
+    def can_send(self) -> bool:
+        return True
+
+    def send_message(self, identifier: str, text: str) -> str:
+        return send.send_message(db.resolve_identifier(identifier), text)
+
+    def resolve_display_name(self, identifier: str) -> str:
+        return format_phone(db.resolve_identifier(identifier))
+
+
+# ---------------------------------------------------------------------------
+# Telegram
+# ---------------------------------------------------------------------------
+
+_telegram_db_instance = None
+
+
+def _get_telegram_db():
+    global _telegram_db_instance
+    if _telegram_db_instance is None:
+        from .telegram_db import TelegramDB
+        _telegram_db_instance = TelegramDB()
+        atexit.register(_telegram_db_instance.close)
+    return _telegram_db_instance
+
+
+class TelegramAdapter(BackendAdapter):
+    name = "telegram"
+    display_name = "Telegram"
+
+    _TG_CONTAINER = Path.home() / "Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
+
+    def is_available(self) -> bool:
+        for variant in ("appstore", ""):
+            base = self._TG_CONTAINER / variant if variant else self._TG_CONTAINER
+            for account_dir in base.glob("account-*"):
+                if (account_dir / "postbox/db/db_sqlite").exists():
+                    return True
+        return False
+
+    def _tdb(self):
+        return _get_telegram_db()
+
+    def recent_chats(self, limit: int) -> list[dict]:
+        return [{
+            "name": c["name"],
+            "id": str(c["peer_id"]),
+            "platform": self.name,
+            "last_message": c["last_message"],
+            "phone": format_phone(c["phone"]) if c.get("phone") else "",
+            "username": c.get("username", ""),
+            "message_count": c.get("message_count"),
+        } for c in self._tdb().recent_chats(limit)]
+
+    def find_chats(self, query: str) -> list[dict]:
+        return [{
+            "name": c["name"],
+            "id": str(c["peer_id"]),
+            "platform": self.name,
+            "phone": format_phone(c["phone"]) if c.get("phone") else "",
+            "username": c.get("username", ""),
+        } for c in self._tdb().find_chats(query)]
+
+    def has_chat(self, identifier: str) -> bool:
+        return self._tdb().resolve_identifier(identifier) is not None
+
+    def read_messages(self, identifier: str, limit: int) -> list[dict]:
+        peer_id = self._tdb().resolve_identifier(identifier)
         if peer_id is None:
             return []
-        return tdb.read_messages(peer_id, limit)
+        return self._tdb().read_messages(peer_id, limit)
 
-    if platform == "whatsapp":
+    def search_messages(self, query: str, limit: int) -> list[dict]:
+        return [{
+            "timestamp": r["timestamp"],
+            "chat_name": r["chat_name"],
+            "sender": r["sender"],
+            "text": r["text"],
+            "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
+            "platform": self.name,
+        } for r in self._tdb().search_messages(query, limit)]
+
+    def stats(self) -> dict:
+        s = self._tdb().stats()
+        return {"platform": self.name, "messages": s["messages"], "chats": s["peers"]}
+
+    def can_send(self) -> bool:
+        return telegram_send.is_available()
+
+    def _require_send(self) -> None:
+        if not self.can_send():
+            raise SystemExit(
+                "No Telegram auth keys found. Is Telegram installed and logged in?"
+            )
+
+    def send_message(self, identifier: str, text: str) -> str:
+        self._require_send()
+        peer_id = self._tdb().resolve_identifier(identifier)
+        if peer_id is None:
+            raise SystemExit(f'Could not find Telegram chat for "{identifier}".')
+        return asyncio.run(telegram_send.send_message(peer_id, text))
+
+    def resolve_display_name(self, identifier: str) -> str:
+        peer_id = self._tdb().resolve_identifier(identifier)
+        if peer_id is None:
+            return identifier
+        peer = self._tdb()._get_peer(peer_id)
+        from .telegram_db import _peer_display_name
+        return _peer_display_name(peer)
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp
+# ---------------------------------------------------------------------------
+
+class WhatsAppAdapter(BackendAdapter):
+    name = "whatsapp"
+    display_name = "WhatsApp"
+
+    def is_available(self) -> bool:
+        return whatsapp_db.is_available()
+
+    def recent_chats(self, limit: int) -> list[dict]:
+        return [{
+            "name": c["name"],
+            "id": c["jid"],
+            "platform": self.name,
+            "last_message": c["last_message"],
+            "phone": format_phone(c["phone"]) if c.get("phone") else "",
+            "username": "",
+            "message_count": c.get("message_count"),
+        } for c in whatsapp_db.recent_chats(limit)]
+
+    def find_chats(self, query: str) -> list[dict]:
+        return [{
+            "name": c["name"],
+            "id": c["jid"],
+            "platform": self.name,
+            "phone": format_phone(c["phone"]) if c.get("phone") else "",
+            "username": "",
+        } for c in whatsapp_db.find_chats(query)]
+
+    def has_chat(self, identifier: str) -> bool:
+        return whatsapp_db.resolve_identifier(identifier) is not None
+
+    def read_messages(self, identifier: str, limit: int) -> list[dict]:
         jid = whatsapp_db.resolve_identifier(identifier)
         if jid is None:
             return []
         return whatsapp_db.read_messages(jid, limit)
 
-    if platform == "messenger":
+    def search_messages(self, query: str, limit: int) -> list[dict]:
+        return [{
+            "timestamp": r["timestamp"],
+            "chat_name": r["chat_name"],
+            "sender": r["sender"],
+            "text": r["text"],
+            "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
+            "platform": self.name,
+        } for r in whatsapp_db.search_messages(query, limit)]
+
+    def stats(self) -> dict:
+        s = whatsapp_db.stats()
+        return {"platform": self.name, "messages": s["messages"], "chats": s["chats"]}
+
+    def can_send(self) -> bool:
+        return whatsapp_send.is_available()
+
+    def _require_send(self) -> None:
+        if not self.can_send():
+            raise SystemExit(
+                "WhatsApp send not available. Ensure wa-send is built and session exists."
+            )
+
+    def send_message(self, identifier: str, text: str) -> str:
+        self._require_send()
+        jid = whatsapp_db.resolve_identifier(identifier)
+        if jid is None:
+            raise SystemExit(f'Could not find WhatsApp chat for "{identifier}".')
+        return whatsapp_send.send_message(jid, text)
+
+    def resolve_display_name(self, identifier: str) -> str:
+        chats = whatsapp_db.find_chats(identifier)
+        return chats[0]["name"] if chats else (whatsapp_db.resolve_identifier(identifier) or identifier)
+
+
+# ---------------------------------------------------------------------------
+# Messenger
+# ---------------------------------------------------------------------------
+
+class MessengerAdapter(BackendAdapter):
+    name = "messenger"
+    display_name = "Messenger"
+
+    def is_available(self) -> bool:
+        return messenger_api.is_available()
+
+    def recent_chats(self, limit: int) -> list[dict]:
+        return [{
+            "name": c["name"],
+            "id": c["thread_id"],
+            "platform": self.name,
+            "last_message": c["last_message"],
+            "phone": "",
+            "username": "",
+            "message_count": c.get("message_count"),
+        } for c in messenger_api.recent_chats(limit)]
+
+    def find_chats(self, query: str) -> list[dict]:
+        return [{
+            "name": c["name"],
+            "id": c["thread_id"],
+            "platform": self.name,
+            "phone": "",
+            "username": "",
+        } for c in messenger_api.find_chats(query)]
+
+    def has_chat(self, identifier: str) -> bool:
+        return messenger_api.resolve_identifier(identifier) is not None
+
+    def read_messages(self, identifier: str, limit: int) -> list[dict]:
         thread_id = messenger_api.resolve_identifier(identifier)
         if thread_id is None:
             return []
         return messenger_api.read_messages(thread_id, limit)
 
-    # Auto-detect: try all platforms
-    im_chat_id = None
-    tg_peer_id = None
-    wa_jid = None
+    def search_messages(self, query: str, limit: int) -> list[dict]:
+        return [{
+            "timestamp": r["timestamp"],
+            "chat_name": r["chat_name"],
+            "sender": r["sender"],
+            "text": r["text"],
+            "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
+            "platform": self.name,
+        } for r in messenger_api.search_messages(query, limit)]
 
-    if "messages" in available_platforms():
-        resolved = db.resolve_identifier(identifier)
-        # find_chats uses LIKE with digits, which handles format differences
-        chats = db.find_chats(identifier)
-        if chats:
-            im_chat_id = chats[0]["chat_identifier"]
-        elif resolved != identifier:
-            # resolve_identifier found a contact phone -- try that too
-            chats = db.find_chats(resolved)
-            if chats:
-                im_chat_id = chats[0]["chat_identifier"]
+    def stats(self) -> dict:
+        s = messenger_api.stats()
+        return {"platform": self.name, "messages": s["messages"], "chats": s["chats"]}
 
-    if "telegram" in available_platforms():
-        tdb = _get_telegram_db()
-        tg_peer_id = tdb.resolve_identifier(identifier)
+    def can_send(self) -> bool:
+        return messenger_api.is_available()
 
-    if "whatsapp" in available_platforms():
-        wa_jid = whatsapp_db.resolve_identifier(identifier)
+    def _require_send(self) -> None:
+        if not self.can_send():
+            raise SystemExit(
+                "Messenger not available. Run 'messages auth messenger' to set up."
+            )
 
-    fb_thread_id = None
-    if "messenger" in available_platforms():
-        fb_thread_id = messenger_api.resolve_identifier(identifier)
+    def send_message(self, identifier: str, text: str) -> str:
+        self._require_send()
+        thread_id = messenger_api.resolve_identifier(identifier)
+        if thread_id is None:
+            raise SystemExit(f'Could not find Messenger chat for "{identifier}".')
+        return messenger_api.send_message(thread_id, text)
 
-    found = [name for name, val in [("Messages", im_chat_id), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid), ("Messenger", fb_thread_id)] if val]
+    def resolve_display_name(self, identifier: str) -> str:
+        chats = messenger_api.find_chats(identifier)
+        return chats[0]["name"] if chats else (messenger_api.resolve_identifier(identifier) or identifier)
+
+
+# ---------------------------------------------------------------------------
+# Registry and dispatch
+# ---------------------------------------------------------------------------
+
+_ALL_BACKENDS = [
+    IMessageAdapter(), TelegramAdapter(), WhatsAppAdapter(), MessengerAdapter(),
+]
+_BACKEND_MAP = {b.name: b for b in _ALL_BACKENDS}
+
+
+def _get_backends(platform: str | None = None) -> list[BackendAdapter]:
+    if platform:
+        b = _BACKEND_MAP.get(platform)
+        return [b] if b and b.is_available() else []
+    return [b for b in _ALL_BACKENDS if b.is_available()]
+
+
+def _get_backend(platform: str) -> BackendAdapter:
+    b = _BACKEND_MAP.get(platform)
+    if b is None or not b.is_available():
+        raise SystemExit(f'Platform "{platform}" is not available.')
+    return b
+
+
+def _find_platform(
+    identifier: str, backends: list[BackendAdapter], require_send: bool = False,
+) -> BackendAdapter | None:
+    found = []
+    for b in backends:
+        if require_send and not b.can_send():
+            continue
+        if b.has_chat(identifier):
+            found.append(b)
     if len(found) > 1:
+        names = " and ".join(b.display_name for b in found)
         raise SystemExit(
-            f'Found "{identifier}" on {" and ".join(found)}. '
-            "Use --platform/-p to specify which one."
+            f'Found "{identifier}" on {names}. Use --platform/-p to specify which one.'
         )
+    return found[0] if found else None
 
-    if im_chat_id:
-        return db.read_messages(im_chat_id, limit)
-    if tg_peer_id:
-        tdb = _get_telegram_db()
-        return tdb.read_messages(tg_peer_id, limit)
-    if wa_jid:
-        return whatsapp_db.read_messages(wa_jid, limit)
-    if fb_thread_id:
-        return messenger_api.read_messages(fb_thread_id, limit)
 
-    return []
+def available_platforms() -> list[str]:
+    return [b.name for b in _ALL_BACKENDS if b.is_available()]
+
+
+def recent_chats(limit: int, platform: str | None = None) -> list[dict]:
+    results = []
+    for b in _get_backends(platform):
+        results.extend(b.recent_chats(limit))
+    results.sort(key=lambda x: x["last_message"], reverse=True)
+    return results[:limit]
+
+
+def find_chats(query: str, platform: str | None = None) -> list[dict]:
+    results = []
+    for b in _get_backends(platform):
+        results.extend(b.find_chats(query))
+    return results
+
+
+def read_messages(
+    identifier: str, limit: int, platform: str | None = None,
+) -> list[dict]:
+    if platform:
+        return _get_backend(platform).read_messages(identifier, limit)
+    b = _find_platform(identifier, _get_backends())
+    return b.read_messages(identifier, limit) if b else []
 
 
 def search_messages(
-    query: str, limit: int, platform: str | None = None
+    query: str, limit: int, platform: str | None = None,
 ) -> list[dict]:
-    """Search messages across platforms, merged by timestamp descending."""
     results = []
-
-    if _want(platform, "messages"):
-        rows = db.search_messages(query, limit)
-        for r in rows:
-            chat_name = r["display_name"] or _format_phone(r["chat_identifier"])
-            sender = r["sender"] if r["sender"] == "Me" else _format_phone(r["sender"])
-            results.append({
-                "timestamp": r["timestamp"],
-                "chat_name": chat_name,
-                "sender": sender,
-                "text": r["text"],
-                "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
-                "platform": "messages",
-            })
-
-    if _want(platform, "telegram"):
-        tdb = _get_telegram_db()
-        rows = tdb.search_messages(query, limit)
-        for r in rows:
-            results.append({
-                "timestamp": r["timestamp"],
-                "chat_name": r["chat_name"],
-                "sender": r["sender"],
-                "text": r["text"],
-                "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
-                "platform": "telegram",
-            })
-
-    if _want(platform, "whatsapp"):
-        rows = whatsapp_db.search_messages(query, limit)
-        for r in rows:
-            results.append({
-                "timestamp": r["timestamp"],
-                "chat_name": r["chat_name"],
-                "sender": r["sender"],
-                "text": r["text"],
-                "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
-                "platform": "whatsapp",
-            })
-
-    if _want(platform, "messenger"):
-        rows = messenger_api.search_messages(query, limit)
-        for r in rows:
-            results.append({
-                "timestamp": r["timestamp"],
-                "chat_name": r["chat_name"],
-                "sender": r["sender"],
-                "text": r["text"],
-                "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
-                "platform": "messenger",
-            })
-
+    for b in _get_backends(platform):
+        results.extend(b.search_messages(query, limit))
     results.sort(key=lambda x: x["timestamp"], reverse=True)
     return results[:limit]
 
 
 def stats(platform: str | None = None) -> list[dict]:
-    """Get message/chat counts per platform."""
-    results = []
+    return [b.stats() for b in _get_backends(platform)]
 
-    if _want(platform, "messages"):
-        conn = db._connect_messages()
-        msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
-        chat_count = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0]
-        conn.close()
-        results.append({
-            "platform": "messages",
-            "messages": msg_count,
-            "chats": chat_count,
-        })
-
-    if _want(platform, "telegram"):
-        tdb = _get_telegram_db()
-        s = tdb.stats()
-        results.append({
-            "platform": "telegram",
-            "messages": s["messages"],
-            "chats": s["peers"],
-        })
-
-    if _want(platform, "whatsapp"):
-        s = whatsapp_db.stats()
-        results.append({
-            "platform": "whatsapp",
-            "messages": s["messages"],
-            "chats": s["chats"],
-        })
-
-    if _want(platform, "messenger"):
-        s = messenger_api.stats()
-        results.append({
-            "platform": "messenger",
-            "messages": s["messages"],
-            "chats": s["chats"],
-        })
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Send
-# ---------------------------------------------------------------------------
 
 def send_message(
-    identifier: str, text: str, platform: str | None = None
+    identifier: str, text: str, platform: str | None = None,
 ) -> tuple[str, str]:
-    """Resolve identifier and send a message.
-
-    Returns (platform_used, result_string).
-    If platform is None, auto-detects (errors if ambiguous).
-    """
-    if platform == "messages":
-        phone = db.resolve_identifier(identifier)
-        result = send.send_message(phone, text)
-        return "messages", result
-
-    if platform == "telegram":
-        if not telegram_send.is_available():
-            raise SystemExit(
-                "No Telegram auth keys found. Is Telegram installed and logged in?"
-            )
-        tdb = _get_telegram_db()
-        peer_id = tdb.resolve_identifier(identifier)
-        if peer_id is None:
-            raise SystemExit(f'Could not find Telegram chat for "{identifier}".')
-        result = asyncio.run(telegram_send.send_message(peer_id, text))
-        return "telegram", result
-
-    if platform == "whatsapp":
-        if not whatsapp_send.is_available():
-            raise SystemExit(
-                "WhatsApp send not available. Ensure wa-send is built and session exists."
-            )
-        jid = whatsapp_db.resolve_identifier(identifier)
-        if jid is None:
-            raise SystemExit(f'Could not find WhatsApp chat for "{identifier}".')
-        result = whatsapp_send.send_message(jid, text)
-        return "whatsapp", result
-
-    if platform == "messenger":
-        if not messenger_api.is_available():
-            raise SystemExit(
-                "Messenger not available. Run 'messages auth messenger' to set up."
-            )
-        thread_id = messenger_api.resolve_identifier(identifier)
-        if thread_id is None:
-            raise SystemExit(f'Could not find Messenger chat for "{identifier}".')
-        result = messenger_api.send_message(thread_id, text)
-        return "messenger", result
-
-    # Auto-detect
-    im_phone = None
-    tg_peer_id = None
-    wa_jid = None
-
-    if "messages" in available_platforms():
-        resolved = db.resolve_identifier(identifier)
-        if resolved != identifier:
-            im_phone = resolved
-        else:
-            chats = db.find_chats(identifier)
-            if chats:
-                im_phone = resolved
-
-    if "telegram" in available_platforms() and telegram_send.is_available():
-        tdb = _get_telegram_db()
-        tg_peer_id = tdb.resolve_identifier(identifier)
-
-    if "whatsapp" in available_platforms() and whatsapp_send.is_available():
-        wa_jid = whatsapp_db.resolve_identifier(identifier)
-
-    fb_thread_id = None
-    if "messenger" in available_platforms():
-        fb_thread_id = messenger_api.resolve_identifier(identifier)
-
-    found = [(n, v) for n, v in [("Messages", im_phone), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid), ("Messenger", fb_thread_id)] if v]
-    if len(found) > 1:
-        raise SystemExit(
-            f'Found "{identifier}" on {" and ".join(n for n, _ in found)}. '
-            "Use --platform/-p to specify which one."
-        )
-
-    if im_phone:
-        result = send.send_message(im_phone, text)
-        return "messages", result
-
-    if tg_peer_id:
-        result = asyncio.run(telegram_send.send_message(tg_peer_id, text))
-        return "telegram", result
-
-    if wa_jid:
-        result = whatsapp_send.send_message(wa_jid, text)
-        return "whatsapp", result
-
-    if fb_thread_id:
-        result = messenger_api.send_message(fb_thread_id, text)
-        return "messenger", result
-
-    raise SystemExit(f'Could not find "{identifier}" on any platform.')
+    if platform:
+        b = _get_backend(platform)
+        return b.name, b.send_message(identifier, text)
+    b = _find_platform(identifier, _get_backends(), require_send=True)
+    if b is None:
+        raise SystemExit(f'Could not find "{identifier}" on any platform.')
+    return b.name, b.send_message(identifier, text)
 
 
 def resolve_send_target(
-    identifier: str, platform: str | None = None
+    identifier: str, platform: str | None = None,
 ) -> tuple[str, str]:
-    """Resolve identifier for send preview (no actual send).
-
-    Returns (platform_name, display_name) for dry-run output.
-    """
-    if platform == "messages":
-        phone = db.resolve_identifier(identifier)
-        return "messages", phone
-
-    if platform == "telegram":
-        if not telegram_send.is_available():
-            raise SystemExit(
-                "No Telegram auth keys found. Is Telegram installed and logged in?"
-            )
-        tdb = _get_telegram_db()
-        peer_id = tdb.resolve_identifier(identifier)
-        if peer_id is None:
-            raise SystemExit(f'Could not find Telegram chat for "{identifier}".')
-        peer = tdb._get_peer(peer_id)
-        from .telegram_db import _peer_display_name
-        return "telegram", _peer_display_name(peer)
-
-    if platform == "whatsapp":
-        if not whatsapp_send.is_available():
-            raise SystemExit(
-                "WhatsApp send not available. Ensure wa-send is built and session exists."
-            )
-        jid = whatsapp_db.resolve_identifier(identifier)
-        if jid is None:
-            raise SystemExit(f'Could not find WhatsApp chat for "{identifier}".')
-        chats = whatsapp_db.find_chats(identifier)
-        name = chats[0]["name"] if chats else jid
-        return "whatsapp", name
-
-    if platform == "messenger":
-        if not messenger_api.is_available():
-            raise SystemExit(
-                "Messenger not available. Run 'messages auth messenger' to set up."
-            )
-        thread_id = messenger_api.resolve_identifier(identifier)
-        if thread_id is None:
-            raise SystemExit(f'Could not find Messenger chat for "{identifier}".')
-        chats = messenger_api.find_chats(identifier)
-        name = chats[0]["name"] if chats else thread_id
-        return "messenger", name
-
-    # Auto-detect
-    im_phone = None
-    tg_peer_id = None
-    wa_jid = None
-
-    if "messages" in available_platforms():
-        resolved = db.resolve_identifier(identifier)
-        if resolved != identifier:
-            im_phone = resolved
-        else:
-            chats = db.find_chats(identifier)
-            if chats:
-                im_phone = resolved
-
-    if "telegram" in available_platforms() and telegram_send.is_available():
-        tdb = _get_telegram_db()
-        tg_peer_id = tdb.resolve_identifier(identifier)
-
-    if "whatsapp" in available_platforms() and whatsapp_send.is_available():
-        wa_jid = whatsapp_db.resolve_identifier(identifier)
-
-    fb_thread_id = None
-    if "messenger" in available_platforms():
-        fb_thread_id = messenger_api.resolve_identifier(identifier)
-
-    found = [(n, v) for n, v in [("Messages", im_phone), ("Telegram", tg_peer_id), ("WhatsApp", wa_jid), ("Messenger", fb_thread_id)] if v]
-    if len(found) > 1:
-        raise SystemExit(
-            f'Found "{identifier}" on {" and ".join(n for n, _ in found)}. '
-            "Use --platform/-p to specify which one."
-        )
-
-    if im_phone:
-        return "messages", im_phone
-
-    if tg_peer_id:
-        tdb = _get_telegram_db()
-        peer = tdb._get_peer(tg_peer_id)
-        from .telegram_db import _peer_display_name
-        return "telegram", _peer_display_name(peer)
-
-    if wa_jid:
-        chats = whatsapp_db.find_chats(identifier)
-        name = chats[0]["name"] if chats else wa_jid
-        return "whatsapp", name
-
-    if fb_thread_id:
-        chats = messenger_api.find_chats(identifier)
-        name = chats[0]["name"] if chats else fb_thread_id
-        return "messenger", name
-
-    raise SystemExit(f'Could not find "{identifier}" on any platform.')
+    if platform:
+        b = _get_backend(platform)
+        b._require_send()
+        return b.name, b.resolve_display_name(identifier)
+    b = _find_platform(identifier, _get_backends(), require_send=True)
+    if b is None:
+        raise SystemExit(f'Could not find "{identifier}" on any platform.')
+    return b.name, b.resolve_display_name(identifier)
