@@ -124,6 +124,7 @@ class IMessageAdapter(BackendAdapter):
             resolved = chats[0]["chat_identifier"] if chats else db.resolve_identifier(chat_id)
         return [{
             "timestamp": r["timestamp"],
+            "chat_id": r["chat_identifier"],
             "chat_name": r["display_name"] or format_phone(r["chat_identifier"]),
             "sender": r["sender"] if r["sender"] == "Me" else format_phone(r["sender"]),
             "text": r["text"],
@@ -214,6 +215,7 @@ class TelegramAdapter(BackendAdapter):
         peer = self._tdb().resolve_identifier(chat_id) if chat_id else None
         return [{
             "timestamp": r["timestamp"],
+            "chat_id": str(r["peer_id"]),
             "chat_name": r["chat_name"],
             "sender": r["sender"],
             "text": r["text"],
@@ -294,6 +296,7 @@ class WhatsAppAdapter(BackendAdapter):
         resolved = whatsapp_db.resolve_identifier(chat_id) if chat_id else None
         return [{
             "timestamp": r["timestamp"],
+            "chat_id": r["jid"],
             "chat_name": r["chat_name"],
             "sender": r["sender"],
             "text": r["text"],
@@ -370,6 +373,7 @@ class MessengerAdapter(BackendAdapter):
         resolved = messenger_api.resolve_identifier(chat_id) if chat_id else None
         return [{
             "timestamp": r["timestamp"],
+            "chat_id": r["thread_id"],
             "chat_name": r["chat_name"],
             "sender": r["sender"],
             "text": r["text"],

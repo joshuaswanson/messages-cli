@@ -736,6 +736,7 @@ def search_messages(query: str, limit: int = 20, thread_id: str | None = None) -
 
         results.append({
             "timestamp": _ts_to_datetime(m["timestamp"]),
+            "thread_id": str(tid),
             "chat_name": chat_name,
             "sender": sender,
             "text": m["text"],

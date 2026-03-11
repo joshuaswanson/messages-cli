@@ -224,22 +224,60 @@ def read_cmd(identifier: str, limit: int, full: bool, platform: str | None):
 @click.option("--limit", default=20, help="Number of results to show.")
 @click.option("--full", is_flag=True, help="Show full message text without truncation.")
 @click.option("--chat", default=None, help="Scope search to a specific chat (name, phone, or ID).")
+@click.option("--context", "-C", default=0, type=int, help="Show N surrounding messages for each hit.")
 @platform_option
-def search_cmd(query: str, limit: int, full: bool, chat: str | None, platform: str | None):
+def search_cmd(query: str, limit: int, full: bool, chat: str | None, context: int, platform: str | None):
     """Search message content across platforms."""
     results = backends.search_messages(query, limit, platform, chat=chat)
     if not results:
         click.echo("No messages found.")
         return
     show_tags = platform is None
-    for r in results:
-        ts = click.style(_display_ts(r["timestamp"]), fg=DIM)
-        chat = click.style(r["chat_name"], fg=SENDER_OTHER)
-        sender_text = r["sender"] if r["sender"] == "Me" else format_phone(r["sender"])
-        sender = click.style(sender_text, fg=SENDER_ME if r["sender"] == "Me" else SENDER_OTHER)
-        text = _truncate(r["text"], full)
-        tag = f"  {_platform_tag(r['platform'])}" if show_tags else ""
-        click.echo(f"{ts}  {chat}  {sender}  {text}{tag}")
+
+    if context <= 0:
+        for r in results:
+            ts = click.style(_display_ts(r["timestamp"]), fg=DIM)
+            chat_col = click.style(r["chat_name"], fg=SENDER_OTHER)
+            sender_text = r["sender"] if r["sender"] == "Me" else format_phone(r["sender"])
+            sender = click.style(sender_text, fg=SENDER_ME if r["sender"] == "Me" else SENDER_OTHER)
+            text = _truncate(r["text"], full)
+            tag = f"  {_platform_tag(r['platform'])}" if show_tags else ""
+            click.echo(f"{ts}  {chat_col}  {sender}  {text}{tag}")
+        return
+
+    # Context mode: fetch surrounding messages for each hit
+    for i, r in enumerate(results):
+        if i > 0:
+            click.echo()
+        tag = f" {_platform_tag(r['platform'])}" if show_tags else ""
+        click.echo(click.style(f"--- {r['chat_name']}{tag} ---", fg=DIM))
+
+        chat_msgs = backends.read_messages(r["chat_id"], context * 2 + 50, r["platform"])
+        # Messages come newest-first; reverse to chronological
+        chat_msgs = list(reversed(chat_msgs))
+
+        # Find the matching message by timestamp
+        hit_idx = None
+        hit_ts = r["timestamp"]
+        for j, m in enumerate(chat_msgs):
+            if m["timestamp"] == hit_ts:
+                hit_idx = j
+                break
+
+        if hit_idx is None:
+            # Fallback: show just the search result
+            click.echo(_format_message(r, full))
+            continue
+
+        start = max(0, hit_idx - context)
+        end = min(len(chat_msgs), hit_idx + context + 1)
+        for j in range(start, end):
+            m = chat_msgs[j]
+            line = _format_message(m, full)
+            if j == hit_idx:
+                click.echo(f"{line}  {click.style('<--', fg='yellow')}")
+            else:
+                click.echo(line)
 
 
 # --- send ---

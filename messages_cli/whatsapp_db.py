@@ -397,6 +397,7 @@ def search_messages(query: str, limit: int = 20, jid: str | None = None) -> list
 
         results.append({
             "timestamp": format_ts(rd["timestamp"]),
+            "jid": jid,
             "chat_name": chat_name,
             "sender": sender,
             "text": rd["ZTEXT"],
