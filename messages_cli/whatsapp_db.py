@@ -354,10 +354,16 @@ def read_messages(jid: str, limit: int = 20) -> list[dict]:
     return messages
 
 
-def search_messages(query: str, limit: int = 20) -> list[dict]:
-    """Search message content across all WhatsApp chats."""
+def search_messages(query: str, limit: int = 20, jid: str | None = None) -> list[dict]:
+    """Search message content, optionally scoped to a specific chat."""
     conn = _connect_chat_db()
     contact_cache = _build_contact_cache()
+    where = "m.ZTEXT LIKE ?"
+    params: list = [f"%{query}%"]
+    if jid:
+        where += " AND c.ZCONTACTJID = ?"
+        params.append(jid)
+    params.append(limit)
     rows = conn.execute(
         f"""
         SELECT {_ts_expr()} as timestamp,
@@ -367,11 +373,11 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
         FROM ZWAMESSAGE m
         JOIN ZWACHATSESSION c ON m.ZCHATSESSION = c.Z_PK
         LEFT JOIN ZWAGROUPMEMBER gm ON m.ZGROUPMEMBER = gm.Z_PK
-        WHERE m.ZTEXT LIKE ?
+        WHERE {where}
         ORDER BY m.ZMESSAGEDATE DESC
         LIMIT ?
         """,
-        (f"%{query}%", limit),
+        params,
     ).fetchall()
     conn.close()
 

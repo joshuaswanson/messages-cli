@@ -404,9 +404,15 @@ def read_messages(chat_id: str, limit: int = 20) -> list[dict]:
     return messages
 
 
-def search_messages(query: str, limit: int = 20) -> list[dict]:
-    """Search message content."""
+def search_messages(query: str, limit: int = 20, chat_id: str | None = None) -> list[dict]:
+    """Search message content, optionally scoped to a specific chat."""
     conn = _connect_messages()
+    where = "m.text LIKE ?"
+    params: list = [f"%{query}%"]
+    if chat_id:
+        where += " AND c.chat_identifier = ?"
+        params.append(chat_id)
+    params.append(limit)
     rows = conn.execute(
         f"""
         SELECT {_ts_expr()} as timestamp,
@@ -419,11 +425,11 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
         JOIN chat c ON cmj.chat_id = c.ROWID
         LEFT JOIN handle h ON m.handle_id = h.ROWID
-        WHERE m.text LIKE ?
+        WHERE {where}
         ORDER BY m.date DESC
         LIMIT ?
         """,
-        (f"%{query}%", limit),
+        params,
     ).fetchall()
     conn.close()
     return [{

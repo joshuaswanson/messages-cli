@@ -704,8 +704,8 @@ def read_messages(thread_id: str, limit: int = 20) -> list[dict]:
     return results
 
 
-def search_messages(query: str, limit: int = 20) -> list[dict]:
-    """Search messages across Messenger threads.
+def search_messages(query: str, limit: int = 20, thread_id: str | None = None) -> list[dict]:
+    """Search messages, optionally scoped to a specific thread.
 
     Note: Only searches messages in the initial inbox sync (recent messages).
     """
@@ -722,6 +722,8 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
             continue
 
         tid = m["thread_id"]
+        if thread_id is not None and str(tid) != str(thread_id):
+            continue
         thread = threads.get(tid, {})
         chat_name = thread.get("name") or users.get(tid, str(tid))
 

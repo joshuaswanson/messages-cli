@@ -902,8 +902,8 @@ class TelegramDB:
 
         return messages
 
-    def search_messages(self, query: str, limit: int = 50) -> list[dict]:
-        """Search all messages for a text substring."""
+    def search_messages(self, query: str, limit: int = 50, peer_id: int | None = None) -> list[dict]:
+        """Search all messages for a text substring, optionally scoped to a peer."""
         self._ensure_connection()
         query_lower = query.lower()
 
@@ -924,6 +924,10 @@ class TelegramDB:
                 continue
 
             idx = _parse_message_key(key)
+
+            if peer_id is not None and idx["peer_id"] != peer_id:
+                continue
+
             peer = self._get_peer(idx["peer_id"])
 
             if msg["incoming"]:

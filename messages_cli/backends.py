@@ -39,7 +39,7 @@ class BackendAdapter(ABC):
     def read_messages(self, identifier: str, limit: int) -> list[dict]: ...
 
     @abstractmethod
-    def search_messages(self, query: str, limit: int) -> list[dict]: ...
+    def search_messages(self, query: str, limit: int, chat_id: str | None = None) -> list[dict]: ...
 
     @abstractmethod
     def stats(self) -> dict: ...
@@ -117,7 +117,11 @@ class IMessageAdapter(BackendAdapter):
             return db.read_messages(chats[0]["chat_identifier"], limit)
         return db.read_messages(db.resolve_identifier(identifier), limit)
 
-    def search_messages(self, query: str, limit: int) -> list[dict]:
+    def search_messages(self, query: str, limit: int, chat_id: str | None = None) -> list[dict]:
+        resolved = None
+        if chat_id:
+            chats = db.find_chats(chat_id)
+            resolved = chats[0]["chat_identifier"] if chats else db.resolve_identifier(chat_id)
         return [{
             "timestamp": r["timestamp"],
             "chat_name": r["display_name"] or format_phone(r["chat_identifier"]),
@@ -125,7 +129,7 @@ class IMessageAdapter(BackendAdapter):
             "text": r["text"],
             "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
             "platform": self.name,
-        } for r in db.search_messages(query, limit)]
+        } for r in db.search_messages(query, limit, chat_id=resolved)]
 
     def stats(self) -> dict:
         conn = db._connect_messages()
@@ -206,7 +210,8 @@ class TelegramAdapter(BackendAdapter):
             return []
         return self._tdb().read_messages(peer_id, limit)
 
-    def search_messages(self, query: str, limit: int) -> list[dict]:
+    def search_messages(self, query: str, limit: int, chat_id: str | None = None) -> list[dict]:
+        peer = self._tdb().resolve_identifier(chat_id) if chat_id else None
         return [{
             "timestamp": r["timestamp"],
             "chat_name": r["chat_name"],
@@ -214,7 +219,7 @@ class TelegramAdapter(BackendAdapter):
             "text": r["text"],
             "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
             "platform": self.name,
-        } for r in self._tdb().search_messages(query, limit)]
+        } for r in self._tdb().search_messages(query, limit, peer_id=peer)]
 
     def stats(self) -> dict:
         s = self._tdb().stats()
@@ -285,7 +290,8 @@ class WhatsAppAdapter(BackendAdapter):
             return []
         return whatsapp_db.read_messages(jid, limit)
 
-    def search_messages(self, query: str, limit: int) -> list[dict]:
+    def search_messages(self, query: str, limit: int, chat_id: str | None = None) -> list[dict]:
+        resolved = whatsapp_db.resolve_identifier(chat_id) if chat_id else None
         return [{
             "timestamp": r["timestamp"],
             "chat_name": r["chat_name"],
@@ -293,7 +299,7 @@ class WhatsAppAdapter(BackendAdapter):
             "text": r["text"],
             "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
             "platform": self.name,
-        } for r in whatsapp_db.search_messages(query, limit)]
+        } for r in whatsapp_db.search_messages(query, limit, jid=resolved)]
 
     def stats(self) -> dict:
         s = whatsapp_db.stats()
@@ -360,7 +366,8 @@ class MessengerAdapter(BackendAdapter):
             return []
         return messenger_api.read_messages(thread_id, limit)
 
-    def search_messages(self, query: str, limit: int) -> list[dict]:
+    def search_messages(self, query: str, limit: int, chat_id: str | None = None) -> list[dict]:
+        resolved = messenger_api.resolve_identifier(chat_id) if chat_id else None
         return [{
             "timestamp": r["timestamp"],
             "chat_name": r["chat_name"],
@@ -368,7 +375,7 @@ class MessengerAdapter(BackendAdapter):
             "text": r["text"],
             "is_from_me": r.get("is_from_me", r["sender"] == "Me"),
             "platform": self.name,
-        } for r in messenger_api.search_messages(query, limit)]
+        } for r in messenger_api.search_messages(query, limit, thread_id=resolved)]
 
     def stats(self) -> dict:
         s = messenger_api.stats()
@@ -465,11 +472,11 @@ def read_messages(
 
 
 def search_messages(
-    query: str, limit: int, platform: str | None = None,
+    query: str, limit: int, platform: str | None = None, chat: str | None = None,
 ) -> list[dict]:
     results = []
     for b in _get_backends(platform):
-        results.extend(b.search_messages(query, limit))
+        results.extend(b.search_messages(query, limit, chat_id=chat))
     results.sort(key=lambda x: x["timestamp"], reverse=True)
     return results[:limit]
 

@@ -223,10 +223,11 @@ def read_cmd(identifier: str, limit: int, full: bool, platform: str | None):
 @click.argument("query")
 @click.option("--limit", default=20, help="Number of results to show.")
 @click.option("--full", is_flag=True, help="Show full message text without truncation.")
+@click.option("--chat", default=None, help="Scope search to a specific chat (name, phone, or ID).")
 @platform_option
-def search_cmd(query: str, limit: int, full: bool, platform: str | None):
+def search_cmd(query: str, limit: int, full: bool, chat: str | None, platform: str | None):
     """Search message content across platforms."""
-    results = backends.search_messages(query, limit, platform)
+    results = backends.search_messages(query, limit, platform, chat=chat)
     if not results:
         click.echo("No messages found.")
         return
