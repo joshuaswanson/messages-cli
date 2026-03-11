@@ -103,6 +103,17 @@ $ messages search "dinner" --limit 3
 2026-02-27 18:30:00  John Smith    Me          Dinner at 7?           [ms]
 2026-02-26 12:15:00  Family Group  Dad         Dinner plans?          [wa]
 2026-02-25 09:00:00  Sarah Chen    Sarah Chen  Thanks for dinner!     [ms]
+
+$ messages search "dinner" --chat "Family Group" -p whatsapp
+2026-02-26 12:15:00  Family Group  Dad  Dinner plans?
+
+$ messages search "dinner" --context 2
+--- Family Group [wa] ---
+2026-02-26 12:10:00  Mom   What should we do this weekend?
+2026-02-26 12:12:00  Me    Not sure yet
+2026-02-26 12:15:00  Dad   Dinner plans?  <--
+2026-02-26 12:20:00  Mom   Great idea!
+2026-02-26 12:25:00  Me    I'm in
 ```
 
 ### Send a message
