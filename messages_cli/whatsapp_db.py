@@ -107,8 +107,33 @@ def _resolve_chat_name(
 
 
 # ---------------------------------------------------------------------------
-# LID to phone resolution (for group message senders)
+# LID resolution (for group message senders)
 # ---------------------------------------------------------------------------
+
+_lid_cache: dict[str, str] | None = None
+
+
+def _build_lid_cache() -> dict[str, str]:
+    """Build mapping from LID JIDs to display names using the contacts DB."""
+    global _lid_cache
+    if _lid_cache is not None:
+        return _lid_cache
+    conn = _connect_contacts_db()
+    if not conn:
+        _lid_cache = {}
+        return _lid_cache
+    try:
+        rows = conn.execute(
+            "SELECT ZLID, ZFULLNAME FROM ZWAADDRESSBOOKCONTACT "
+            "WHERE ZLID IS NOT NULL AND ZLID != '' AND ZFULLNAME IS NOT NULL AND ZFULLNAME != ''"
+        ).fetchall()
+        _lid_cache = {r["ZLID"]: r["ZFULLNAME"] for r in rows}
+        conn.close()
+        return _lid_cache
+    except Exception:
+        _lid_cache = {}
+        return _lid_cache
+
 
 def _resolve_group_sender(
     member_jid: str | None,
@@ -117,11 +142,19 @@ def _resolve_group_sender(
     """Resolve a group message sender using the ZWAGROUPMEMBER JID."""
     if not member_jid:
         return "Unknown"
+    # Try contact cache (works for @s.whatsapp.net JIDs)
     if member_jid in contact_cache:
         return contact_cache[member_jid]
+    # Try LID cache (works for @lid JIDs)
+    if member_jid.endswith("@lid"):
+        lid_cache = _build_lid_cache()
+        if member_jid in lid_cache:
+            return lid_cache[member_jid]
     # Format the phone number from the JID as fallback
     jid_base = member_jid.split("@")[0] if "@" in member_jid else member_jid
-    return format_phone(jid_base)
+    if member_jid.endswith("@s.whatsapp.net"):
+        return format_phone(jid_base)
+    return member_jid
 
 
 # ---------------------------------------------------------------------------
