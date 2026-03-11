@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from .utils import format_ts
+from .utils import format_phone, format_ts
 
 # WhatsApp Desktop stores data in Group Containers
 _WA_CONTAINER = Path.home() / "Library/Group Containers/group.net.whatsapp.WhatsApp.shared"
@@ -92,31 +92,6 @@ def _build_jid_to_phone() -> dict[str, str]:
         return {}
 
 
-def _resolve_sender(
-    from_jid: str | None,
-    push_name: str | None,
-    is_from_me: bool,
-    contact_cache: dict[str, str],
-) -> str:
-    """Resolve a sender JID to a display name."""
-    if is_from_me:
-        return "Me"
-    if not from_jid:
-        return push_name or "Unknown"
-    # Try contact name first
-    # from_jid in groups uses LID format (NUMBER@lid)
-    # Strip the @lid or @s.whatsapp.net suffix for lookup
-    jid_base = from_jid.split("@")[0] if "@" in from_jid else from_jid
-    # Try direct JID match
-    if from_jid in contact_cache:
-        return contact_cache[from_jid]
-    # Try with @s.whatsapp.net suffix
-    phone_jid = f"{jid_base}@s.whatsapp.net"
-    if phone_jid in contact_cache:
-        return contact_cache[phone_jid]
-    # Fall back to push name or JID
-    return push_name or from_jid
-
 
 def _resolve_chat_name(
     row: dict,
@@ -135,13 +110,18 @@ def _resolve_chat_name(
 # LID to phone resolution (for group message senders)
 # ---------------------------------------------------------------------------
 
-def _build_lid_to_name(conn: sqlite3.Connection) -> dict[str, str]:
-    """Build mapping from LID JIDs to contact names using group member table."""
-    rows = conn.execute(
-        "SELECT ZMEMBERJID, ZCONTACTNAME FROM ZWAGROUPMEMBER "
-        "WHERE ZMEMBERJID IS NOT NULL AND ZCONTACTNAME IS NOT NULL AND ZCONTACTNAME != ''"
-    ).fetchall()
-    return {r["ZMEMBERJID"]: r["ZCONTACTNAME"] for r in rows}
+def _resolve_group_sender(
+    member_jid: str | None,
+    contact_cache: dict[str, str],
+) -> str:
+    """Resolve a group message sender using the ZWAGROUPMEMBER JID."""
+    if not member_jid:
+        return "Unknown"
+    if member_jid in contact_cache:
+        return contact_cache[member_jid]
+    # Format the phone number from the JID as fallback
+    jid_base = member_jid.split("@")[0] if "@" in member_jid else member_jid
+    return format_phone(jid_base)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +284,6 @@ def read_messages(jid: str, limit: int = 20) -> list[dict]:
     """Read messages from a chat by JID."""
     conn = _connect_chat_db()
     contact_cache = _build_contact_cache()
-    lid_cache = _build_lid_to_name(conn)
 
     # Get chat session Z_PK and partner name
     session = conn.execute(
@@ -322,11 +301,13 @@ def read_messages(jid: str, limit: int = 20) -> list[dict]:
     rows = conn.execute(
         f"""
         SELECT {_ts_expr()} as timestamp,
-               m.ZISFROMME, m.ZFROMJID, m.ZPUSHNAME, m.ZTEXT,
+               m.ZISFROMME, m.ZTEXT,
                m.ZMESSAGETYPE, m.ZMEDIAITEM,
-               mi.ZMEDIALOCALPATH, mi.ZVCARDNAME, mi.ZTITLE
+               mi.ZMEDIALOCALPATH, mi.ZVCARDNAME, mi.ZTITLE,
+               gm.ZMEMBERJID
         FROM ZWAMESSAGE m
         LEFT JOIN ZWAMEDIAITEM mi ON mi.ZMESSAGE = m.Z_PK
+        LEFT JOIN ZWAGROUPMEMBER gm ON m.ZGROUPMEMBER = gm.Z_PK
         WHERE m.ZCHATSESSION = ?
         ORDER BY m.ZMESSAGEDATE DESC
         LIMIT ?
@@ -351,16 +332,9 @@ def read_messages(jid: str, limit: int = 20) -> list[dict]:
         if r["ZISFROMME"]:
             sender = "Me"
         elif not is_group:
-            # In DMs, the other person is always the partner
             sender = partner_name or contact_cache.get(jid, jid)
         else:
-            # In groups, try LID cache, then group member names, then contact cache
-            from_jid = r["ZFROMJID"]
-            if from_jid and from_jid in lid_cache:
-                sender = lid_cache[from_jid]
-            else:
-                push_name = _decode_push_name(r["ZPUSHNAME"])
-                sender = _resolve_sender(from_jid, push_name, False, contact_cache)
+            sender = _resolve_group_sender(r["ZMEMBERJID"], contact_cache)
 
         # Resolve image path for image messages (type 1)
         image_paths: list[str] = []
@@ -384,14 +358,15 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
     """Search message content across all WhatsApp chats."""
     conn = _connect_chat_db()
     contact_cache = _build_contact_cache()
-    lid_cache = _build_lid_to_name(conn)
     rows = conn.execute(
         f"""
         SELECT {_ts_expr()} as timestamp,
                c.ZCONTACTJID, c.ZPARTNERNAME,
-               m.ZISFROMME, m.ZFROMJID, m.ZPUSHNAME, m.ZTEXT
+               m.ZISFROMME, m.ZTEXT,
+               gm.ZMEMBERJID
         FROM ZWAMESSAGE m
         JOIN ZWACHATSESSION c ON m.ZCHATSESSION = c.Z_PK
+        LEFT JOIN ZWAGROUPMEMBER gm ON m.ZGROUPMEMBER = gm.Z_PK
         WHERE m.ZTEXT LIKE ?
         ORDER BY m.ZMESSAGEDATE DESC
         LIMIT ?
@@ -412,12 +387,7 @@ def search_messages(query: str, limit: int = 20) -> list[dict]:
         elif not is_group:
             sender = chat_name
         else:
-            from_jid = rd["ZFROMJID"]
-            if from_jid and from_jid in lid_cache:
-                sender = lid_cache[from_jid]
-            else:
-                push_name = _decode_push_name(rd["ZPUSHNAME"])
-                sender = _resolve_sender(from_jid, push_name, False, contact_cache)
+            sender = _resolve_group_sender(rd["ZMEMBERJID"], contact_cache)
 
         results.append({
             "timestamp": format_ts(rd["timestamp"]),
@@ -457,12 +427,3 @@ def _media_type_label(msg_type: int | None) -> str:
     return labels.get(msg_type, "media")
 
 
-def _decode_push_name(raw: str | None) -> str | None:
-    """Decode push name, which may be protobuf-encoded binary."""
-    if not raw:
-        return None
-    # If it's printable ASCII/Unicode, return as-is
-    if raw.isprintable() and len(raw) < 100:
-        return raw
-    # Otherwise it's likely protobuf junk, skip it
-    return None
