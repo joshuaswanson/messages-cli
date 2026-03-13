@@ -191,3 +191,9 @@ Message dicts from `read_messages()` include:
 - `image_paths` -- list of local file paths to image attachments
 
 Chat/thread dicts from `recent_chats()` include `message_count` (per-thread message count) on iMessage, WhatsApp, and Telegram. Messenger's `all_threads()` returns `{"threads": [...], "has_more": bool}` indicating whether pagination was exhaustive.
+
+## Support
+
+If you find this useful, [buy me a coffee](https://buymeacoffee.com/swanson).
+
+<img src="assets/bmc_qr.png" alt="Buy Me a Coffee QR" width="200">
