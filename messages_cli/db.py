@@ -89,10 +89,20 @@ def _find_chat_by_display_name(name: str) -> str | None:
 def resolve_identifier(identifier: str) -> str:
     if _has_digits(identifier):
         return identifier
-    # Try group chat display name first
-    chat_id = _find_chat_by_display_name(identifier)
-    if chat_id:
-        return chat_id
+    # Find all matching chats (DM and group)
+    chats = find_chats(identifier)
+    if chats:
+        if len(chats) == 1:
+            return chats[0]["chat_identifier"]
+        # Multiple matches - prefer direct 1-on-1 chats (non-group)
+        direct = [c for c in chats if not c["chat_identifier"].startswith("chat")]
+        if len(direct) == 1:
+            return direct[0]["chat_identifier"]
+        if len(direct) > 1:
+            raise SystemExit(
+                f'Multiple chats match "{identifier}". '
+                "Specify a phone number instead."
+            )
     # Fall back to contact name resolution
     contacts = search_contacts(identifier)
     if not contacts:

@@ -558,9 +558,18 @@ def resolve_identifier(identifier: str) -> str | None:
     if identifier.isdigit():
         return identifier
     chats = find_chats(identifier)
-    if chats:
+    if not chats:
+        return None
+    if len(chats) == 1:
         return chats[0]["thread_id"]
-    return None
+    # Multiple matches - prefer direct 1-on-1 chats over groups
+    direct = [c for c in chats if not c["is_group"]]
+    if len(direct) == 1:
+        return direct[0]["thread_id"]
+    raise SystemExit(
+        f'Multiple chats match "{identifier}". '
+        "Specify a thread ID instead."
+    )
 
 
 def read_messages(thread_id: str, limit: int = 20) -> list[dict]:

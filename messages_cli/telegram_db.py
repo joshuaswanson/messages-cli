@@ -813,6 +813,7 @@ class TelegramDB:
                     "name": name,
                     "username": peer.get("username", ""),
                     "phone": peer.get("phone", ""),
+                    "is_group": bool(peer.get("title")) and not peer.get("first_name"),
                 })
 
         return results
@@ -849,9 +850,18 @@ class TelegramDB:
                 return result
         # Name lookup
         matches = self.find_chats(stripped)
-        if matches:
+        if not matches:
+            return None
+        if len(matches) == 1:
             return matches[0]["peer_id"]
-        return None
+        # Multiple matches - prefer direct 1-on-1 chats over groups
+        direct = [m for m in matches if not m["is_group"]]
+        if len(direct) == 1:
+            return direct[0]["peer_id"]
+        raise SystemExit(
+            f'Multiple chats match "{identifier}". '
+            "Specify a phone number or peer ID instead."
+        )
 
     def read_messages(self, peer_id: int, limit: int = 20) -> list[dict]:
         """Read messages from a specific chat."""
