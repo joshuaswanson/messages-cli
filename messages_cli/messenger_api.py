@@ -37,7 +37,7 @@ def is_available() -> bool:
 
 
 class MessengerAPIError(BackendError):
-    pass
+    """Facebook answered, but rejected the request or returned something unexpected."""
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +267,10 @@ class MessengerSession:
             )
             resp.raise_for_status()
             result = resp.json()
-        except (requests.RequestException, ValueError) as e:
-            raise MessengerAPIError(f"Messenger request failed: {e}") from e
+        except requests.RequestException as e:
+            raise BackendError(f"Messenger request failed: {e}") from e
+        except ValueError as e:
+            raise MessengerAPIError("Messenger returned a non-JSON response.") from e
         if result.get("errors"):
             raise MessengerAPIError(f"Messenger API error: {result['errors'][0].get('message', result['errors'])}")
         try:
@@ -276,18 +278,22 @@ class MessengerSession:
         except (KeyError, TypeError, ValueError) as e:
             raise MessengerAPIError("Unexpected Messenger API response.") from e
 
-    def graphql(self, request_type: int, request_payload: dict) -> dict:
-        """Make a Lightspeed GraphQL request, rediscovering stale cached API IDs once."""
+    def _read_graphql(self, request_payload: dict) -> dict:
+        """A read-only sync request (type 1).
+
+        If Facebook rejects it while the API IDs come from the disk cache, the
+        IDs are rediscovered and the request is repeated once. Network errors
+        are never retried. Writes must not use this, because a repeated send
+        could deliver a message twice.
+        """
         try:
-            return self._post_graphql(request_type, request_payload)
+            return self._post_graphql(1, request_payload)
         except MessengerAPIError:
             if not self._ids_from_cache:
                 raise
         page = self._session.get("https://www.messenger.com", timeout=_TIMEOUT)
         self._discover_api_ids(page.text)
-        if request_type == 1:
-            request_payload = {**request_payload, "version": self._schema_version}
-        return self._post_graphql(request_type, request_payload)
+        return self._post_graphql(1, {**request_payload, "version": self._schema_version})
 
     def fetch_thread_page(self, thread_id: str) -> list[dict]:
         """Fetch a thread page and extract all embedded lightspeed payloads."""
@@ -312,7 +318,7 @@ class MessengerSession:
     def inbox(self) -> Inbox:
         """The initial inbox sync, fetched once per process."""
         if self._inbox is None:
-            payload = self.graphql(1, {
+            payload = self._read_graphql({
                 "database": 1,
                 "version": self._schema_version,
                 "sync_params": json.dumps({}),
@@ -321,10 +327,13 @@ class MessengerSession:
         return self._inbox
 
     def send_text(self, thread_id: str, text: str) -> None:
+        """Send once, with no retry. Facebook may have delivered a message even when the response is lost."""
+        # The inbox read confirms (or refreshes) cached API IDs before the send.
+        self.inbox()
         timestamp = int(datetime.datetime.now().timestamp() * 1000)
         epoch = timestamp << 22
         otid = epoch + random.randrange(2**22)
-        self.graphql(3, {
+        self._post_graphql(3, {
             "version_id": self._schema_version,
             "epoch_id": epoch,
             "tasks": [{

@@ -34,3 +34,55 @@ def test_parse_inbox_names_threads():
     assert inbox.thread_name(30) == "Bob, Carol"
     assert inbox.threads[30]["is_group"]
     assert [msg["text"] for msg in inbox.messages] == ["hey there"]
+
+
+def _session_with_cached_ids(monkeypatch, responses):
+    sess = m.MessengerSession()
+    sess._ids_from_cache = True
+    sess._schema_version = "1"
+    calls = []
+
+    def fake_post(request_type, payload):
+        calls.append(request_type)
+        outcome = responses.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def fake_discover(page_text):
+        sess._ids_from_cache = False
+        sess._schema_version = "2"
+
+    class FakeHTTP:
+        def get(self, *args, **kwargs):
+            return type("Page", (), {"text": ""})()
+
+    monkeypatch.setattr(sess, "_post_graphql", fake_post)
+    monkeypatch.setattr(sess, "_discover_api_ids", fake_discover)
+    sess._session = FakeHTTP()
+    return sess, calls
+
+
+def test_send_is_never_retried(monkeypatch):
+    import pytest
+
+    sess, calls = _session_with_cached_ids(monkeypatch, [{}, m.MessengerAPIError("rejected")])
+    with pytest.raises(m.MessengerAPIError):
+        sess.send_text("123", "hi")
+    assert calls == [1, 3]
+
+
+def test_network_error_on_send_is_not_retried(monkeypatch):
+    import pytest
+
+    sess, calls = _session_with_cached_ids(monkeypatch, [{}, m.BackendError("timeout")])
+    with pytest.raises(m.BackendError):
+        sess.send_text("123", "hi")
+    assert calls == [1, 3]
+
+
+def test_stale_cached_ids_are_refreshed_for_reads(monkeypatch):
+    sess, calls = _session_with_cached_ids(monkeypatch, [m.MessengerAPIError("stale"), {}])
+    sess.inbox()
+    assert calls == [1, 1]
+    assert not sess._ids_from_cache
