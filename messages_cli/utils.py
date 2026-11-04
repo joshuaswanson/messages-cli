@@ -29,10 +29,15 @@ _PHONE_CHARS = re.compile(r"^\+?[\d\s\-().]+$")
 MIN_PHONE_DIGITS = 7
 
 
+# Separate Go modules: the Messenger library pins an older whatsmeow than
+# WhatsApp currently accepts.
+GO_MODULES = ("whatsapp", "messenger")
+
+
 def go_source_dir() -> Path | None:
     """Location of the Go tool sources (wheel installs and source checkouts)."""
     for candidate in (_PACKAGE_DIR / "go", _PACKAGE_DIR.parent / "go"):
-        if (candidate / "go.mod").exists():
+        if all((candidate / module / "go.mod").exists() for module in GO_MODULES):
             return candidate
     return None
 

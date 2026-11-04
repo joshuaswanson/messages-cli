@@ -22,13 +22,13 @@ uv tool install .               # or install the `messages` command globally
 
 ### Go helper tools
 
-WhatsApp sending and Messenger pagination use small Go programs in `go/cmd/`. Build them once (requires Go):
+WhatsApp sending and Messenger pagination use small Go programs in two Go modules, `go/whatsapp/` and `go/messenger/`. They are separate because the Messenger library pins an older whatsmeow than WhatsApp currently accepts. Build them once (requires Go):
 
 ```bash
 messages setup
 ```
 
-This builds `wa-auth`, `wa-send`, `fb-fetch`, and `fb-threads` into `~/.local/share/messages-cli/bin`. The CLI also finds binaries in `$MESSAGES_CLI_BIN_DIR`, in `go/bin/` of a checkout (`cd go && go build -o bin/ ./cmd/...`), and on `PATH`.
+This builds `wa-auth`, `wa-send`, `fb-fetch`, and `fb-threads` into `~/.local/share/messages-cli/bin`. The CLI also finds binaries in `$MESSAGES_CLI_BIN_DIR`, in `go/bin/` of a checkout (`cd go/whatsapp && go build -o ../bin/ ./cmd/...`, and the same in `go/messenger`), and on `PATH`.
 
 ### WhatsApp sending setup
 

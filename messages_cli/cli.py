@@ -12,7 +12,7 @@ import click
 
 from . import backends, db, messenger_auth, whatsapp_auth
 from .models import BackendError, Chat, Message, SearchHit
-from .utils import INSTALLED_BIN_DIR, format_phone, go_source_dir
+from .utils import GO_MODULES, INSTALLED_BIN_DIR, format_phone, go_source_dir
 
 DIM = "bright_black"
 SENDER_ME = "green"
@@ -344,8 +344,9 @@ def setup_cmd():
     if shutil.which("go") is None:
         raise click.ClickException("Go is not installed. Install it with: brew install go")
     INSTALLED_BIN_DIR.mkdir(parents=True, exist_ok=True)
-    click.echo(f"Building Go tools into {INSTALLED_BIN_DIR} ...")
-    result = subprocess.run(["go", "build", "-o", f"{INSTALLED_BIN_DIR}/", "./cmd/..."], cwd=source)
-    if result.returncode != 0:
-        raise click.ClickException("go build failed.")
+    for module in GO_MODULES:
+        click.echo(f"Building {module} tools into {INSTALLED_BIN_DIR} ...")
+        result = subprocess.run(["go", "build", "-o", f"{INSTALLED_BIN_DIR}/", "./cmd/..."], cwd=source / module)
+        if result.returncode != 0:
+            raise click.ClickException(f"go build failed for the {module} tools.")
     click.echo("Done.")

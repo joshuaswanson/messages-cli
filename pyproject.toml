@@ -31,9 +31,8 @@ build-backend = "hatchling.build"
 packages = ["messages_cli"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"go/go.mod" = "messages_cli/go/go.mod"
-"go/go.sum" = "messages_cli/go/go.sum"
-"go/cmd" = "messages_cli/go/cmd"
+"go/whatsapp" = "messages_cli/go/whatsapp"
+"go/messenger" = "messages_cli/go/messenger"
 
 [tool.ruff]
 line-length = 120

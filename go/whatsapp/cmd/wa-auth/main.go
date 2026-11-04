@@ -16,7 +16,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
-	"github.com/joshuaswanson/messages-cli/go/internal/wasession"
+	"github.com/joshuaswanson/messages-cli/go/whatsapp/internal/wasession"
 )
 
 const connectTimeout = 20 * time.Second
