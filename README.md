@@ -28,7 +28,7 @@ WhatsApp sending and Messenger pagination use small Go programs in two Go module
 messages setup
 ```
 
-This builds `wa-auth`, `wa-send`, `fb-fetch`, and `fb-threads` into `~/.local/share/messages-cli/bin`. The CLI also finds binaries in `$MESSAGES_CLI_BIN_DIR`, in `go/bin/` of a checkout (`cd go/whatsapp && go build -o ../bin/ ./cmd/...`, and the same in `go/messenger`), and on `PATH`.
+This builds `wa-auth`, `wa-send`, `wa-media`, `fb-fetch`, and `fb-threads` into `~/.local/share/messages-cli/bin`. The CLI also finds binaries in `$MESSAGES_CLI_BIN_DIR`, in `go/bin/` of a checkout (`cd go/whatsapp && go build -o ../bin/ ./cmd/...`, and the same in `go/messenger`), and on `PATH`.
 
 ### WhatsApp sending setup
 
@@ -39,6 +39,18 @@ messages auth whatsapp
 ```
 
 This creates a session at `~/.whatsapp-cli/whatsapp.db`. You only need to do this once.
+
+### Downloading expired WhatsApp media
+
+`wa-media` downloads media whose CDN links have expired by asking your phone to re-upload it. It reads undownloaded items from `~/.whatsapp-cli/messages.db` and saves files to `~/.whatsapp-cli/media/<chat>/`.
+
+```bash
+~/.local/share/messages-cli/bin/wa-media --dry-run              # list undownloaded images
+~/.local/share/messages-cli/bin/wa-media --type video --limit 20
+~/.local/share/messages-cli/bin/wa-media --chat "+41 79 123 45 67"
+```
+
+`--type` accepts `image`, `video`, `audio`, or `document`. `--chat` accepts phone numbers or JIDs, comma-separated. Your phone must be online for re-uploads.
 
 ### Messenger setup
 

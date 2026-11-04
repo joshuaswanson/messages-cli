@@ -5,4 +5,3 @@ dist/
 *.egg-info/
 .claude/
 go/bin/
-wa-media-tool/wa-media-tool
