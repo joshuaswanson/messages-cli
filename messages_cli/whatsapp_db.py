@@ -10,6 +10,7 @@ from pathlib import Path
 from .models import BackendError, Chat, Message, SearchHit
 from .utils import (
     COREDATA_EPOCH,
+    WHATSAPP_SESSION_DIR,
     choose_chat,
     format_phone,
     format_ts,
@@ -24,7 +25,11 @@ CONTACTS_DB = _WA_CONTAINER / "ContactsV2.sqlite"
 _MEDIA_BASE = _WA_CONTAINER / "Message"
 
 _MEDIA_LABELS = {1: "image", 2: "video", 3: "audio", 5: "location", 8: "document", 15: "sticker"}
-_IMAGE_TYPE = 1
+_DOWNLOADABLE_TYPES = {1, 2, 3, 8, 15}
+_IMAGE_TYPES = {1, 15}
+# wa-media saves files here as <sanitized chat JID>/<sanitized message ID>.<ext>
+WA_MEDIA_DIR = WHATSAPP_SESSION_DIR / "media"
+_UNSAFE_PATH_CHARS = str.maketrans({c: "_" for c in '/\\:*?"<>|'})
 _ACTIVE_SESSION = "ZREMOVED = 0 AND ZHIDDEN = 0"
 
 
@@ -190,7 +195,7 @@ def resolve_chat(identifier: str, strict: bool = False) -> Chat | None:
 
 _MESSAGE_SELECT = f"""
     SELECT {_ts_expr()} AS timestamp, m.Z_PK, m.ZMESSAGEDATE,
-           m.ZISFROMME, m.ZTEXT, m.ZMESSAGETYPE,
+           m.ZISFROMME, m.ZTEXT, m.ZMESSAGETYPE, m.ZSTANZAID,
            mi.ZMEDIALOCALPATH, mi.ZVCARDNAME, mi.ZTITLE,
            gm.ZMEMBERJID, gm.ZCONTACTNAME, gm.ZFIRSTNAME, p.ZPUSHNAME,
            c.ZCONTACTJID, c.ZPARTNERNAME
@@ -202,11 +207,33 @@ _MESSAGE_SELECT = f"""
 """
 
 
+def _downloaded_media(jid: str, stanza_id: str | None) -> Path | None:
+    """A file fetched by wa-media for a message WhatsApp Desktop never saved."""
+    if not stanza_id:
+        return None
+    folder = WA_MEDIA_DIR / jid.translate(_UNSAFE_PATH_CHARS)
+    return next(iter(sorted(folder.glob(f"{stanza_id.translate(_UNSAFE_PATH_CHARS)}.*"))), None)
+
+
+def _media(r: sqlite3.Row) -> tuple[str | None, Path | None]:
+    """(tag, local file) for a message's attachment."""
+    msg_type = r["ZMESSAGETYPE"]
+    label = _MEDIA_LABELS.get(msg_type, "media")
+    if r["ZMEDIALOCALPATH"]:
+        name = r["ZTITLE"] or r["ZVCARDNAME"] or r["ZMEDIALOCALPATH"]
+        return f"[{label}: {name}]", _MEDIA_BASE / r["ZMEDIALOCALPATH"]
+    if msg_type not in _DOWNLOADABLE_TYPES:
+        return None, None
+    downloaded = _downloaded_media(r["ZCONTACTJID"] or "", r["ZSTANZAID"])
+    if downloaded:
+        return f"[{label}: {r['ZTITLE'] or downloaded.name}]", downloaded
+    return f"[{label}: not downloaded]", None
+
+
 def _row_to_message(r: sqlite3.Row) -> Message | None:
     text = r["ZTEXT"]
-    if r["ZMEDIALOCALPATH"]:
-        media_name = r["ZTITLE"] or r["ZVCARDNAME"] or r["ZMEDIALOCALPATH"]
-        media_tag = f"[{_MEDIA_LABELS.get(r['ZMESSAGETYPE'], 'media')}: {media_name}]"
+    media_tag, media_path = _media(r)
+    if media_tag:
         text = f"{text} {media_tag}" if text else media_tag
     if not text:
         return None
@@ -220,10 +247,8 @@ def _row_to_message(r: sqlite3.Row) -> Message | None:
         sender = _chat_name(r["ZPARTNERNAME"], jid)
 
     image_paths: list[str] = []
-    if r["ZMESSAGETYPE"] == _IMAGE_TYPE and r["ZMEDIALOCALPATH"]:
-        full_path = _MEDIA_BASE / r["ZMEDIALOCALPATH"]
-        if full_path.exists():
-            image_paths.append(str(full_path))
+    if r["ZMESSAGETYPE"] in _IMAGE_TYPES and media_path and media_path.exists():
+        image_paths.append(str(media_path))
 
     return Message(
         id=str(r["Z_PK"]),

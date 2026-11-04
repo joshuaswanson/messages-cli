@@ -1,11 +1,16 @@
-// wa-media: download WhatsApp media whose CDN links have expired.
+// wa-media: download WhatsApp media that WhatsApp Desktop has not saved locally.
 //
-// Usage: wa-media [--type image] [--chat PHONE_OR_JID,...] [--limit N] [--dry-run]
+// Usage: wa-media [--type image,video] [--chat NAME_PHONE_OR_JID,...] [--limit N] [--dry-run]
 //
-// Undownloaded media is read from <session>/messages.db (table "messages").
-// Files are downloaded directly when the CDN link still works. Otherwise the
-// phone is asked to re-upload them (media retry receipt), and the file is
-// fetched from the new path.
+// whatsmeow is an unofficial client, and WhatsApp may restrict accounts that
+// show automated, high-volume behavior. Re-upload requests are therefore
+// spaced out (--retry-interval) and runs are capped at 20 items by default.
+//
+// Media is listed from WhatsApp Desktop's ChatStorage.sqlite (opened
+// read-only). Each item is downloaded from the WhatsApp CDN when its link
+// still works. Otherwise the phone is asked to re-upload it (media retry
+// receipt) and the file is fetched from the new path. Files are saved as
+// <output>/<chat JID>/<message ID>.<ext>, where messages-cli finds them.
 package main
 
 import (
@@ -14,6 +19,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -35,37 +41,12 @@ import (
 const (
 	connectTimeout = 20 * time.Second
 	batchSize      = 10
+	// Seconds between 1970-01-01 and 2001-01-01 (CoreData reference date).
+	coreDataEpoch = 978307200
 )
 
-// MediaEntry is an undownloaded media item from messages.db.
-type MediaEntry struct {
-	ID            string
-	ChatJID       string
-	Sender        string
-	MediaType     string
-	DirectPath    string
-	MimeType      string
-	MediaKey      []byte
-	FileSHA256    []byte
-	FileEncSHA256 []byte
-	FileLength    int64
-	Timestamp     time.Time
-}
-
-type retryResult struct {
-	DirectPath string
-	Err        error
-}
-
-type pendingRetry struct {
-	entry  MediaEntry
-	doneCh chan retryResult
-}
-
-var (
-	pendingRetries   = make(map[string]*pendingRetry)
-	pendingRetriesMu sync.Mutex
-)
+var chatStorage = filepath.Join(os.Getenv("HOME"),
+	"Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite")
 
 func fail(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
@@ -75,51 +56,48 @@ func fail(format string, args ...any) {
 func main() {
 	sessionDir := flag.String("session", filepath.Join(os.Getenv("HOME"), ".whatsapp-cli"), "whatsmeow session directory")
 	outputDir := flag.String("output", filepath.Join(os.Getenv("HOME"), ".whatsapp-cli", "media"), "media output directory")
-	mediaType := flag.String("type", "image", "media type to download (image, video, audio, document)")
-	limit := flag.Int("limit", 0, "max items to process (0 = all)")
+	typeFlag := flag.String("type", "image", "comma-separated media types: image, video, audio, document, sticker, or all")
+	limit := flag.Int("limit", 20, "max items to process, newest first (0 = all; large runs send many re-upload requests from an unofficial client)")
 	retryTimeout := flag.Duration("retry-timeout", 30*time.Second, "timeout waiting for media retry responses")
+	retryInterval := flag.Duration("retry-interval", time.Second, "pause between re-upload requests to the phone")
 	dryRun := flag.Bool("dry-run", false, "list what would be downloaded without connecting")
-	chatFilter := flag.String("chat", "", "only these chats (comma-separated phone numbers or JIDs)")
+	chatFilter := flag.String("chat", "", "only these chats (comma-separated names, phone numbers, or JIDs)")
+	includeStatus := flag.Bool("include-status", false, "include status updates (phones usually delete them after 24 hours)")
 	flag.Parse()
 
-	if _, err := toWhatsmeowMediaType(*mediaType); err != nil {
+	kinds, err := parseKinds(*typeFlag)
+	if err != nil {
 		fail("%v", err)
 	}
-
-	messagesDBPath := filepath.Join(*sessionDir, "messages.db")
-	if _, err := os.Stat(messagesDBPath); os.IsNotExist(err) {
-		fail("Media index not found at %s", messagesDBPath)
-	}
-	entries, err := loadUndownloadedMedia(messagesDBPath, *mediaType, *limit)
+	db, err := openReadOnly(chatStorage)
 	if err != nil {
-		fail("Failed to load media entries: %v", err)
+		fail("Cannot open the WhatsApp Desktop database (grant Full Disk Access to your terminal): %v", err)
+	}
+	defer db.Close()
+
+	entries, err := loadMedia(db, kinds, *chatFilter, *includeStatus)
+	if err != nil {
+		fail("Failed to list media: %v", err)
+	}
+	var todo []MediaEntry
+	for _, e := range entries {
+		if _, err := os.Stat(targetPath(*outputDir, e)); err != nil {
+			todo = append(todo, e)
+		}
+	}
+	fmt.Printf("%d undownloaded item(s), %d already in %s\n", len(todo), len(entries)-len(todo), *outputDir)
+	if *limit > 0 && len(todo) > *limit {
+		todo = todo[:*limit]
+		fmt.Printf("Processing the newest %d (use --limit to change)\n", len(todo))
 	}
 
-	if *chatFilter != "" {
-		allowed, err := resolveChatFilter(messagesDBPath, *chatFilter)
-		if err != nil {
-			fail("Failed to resolve chat filter: %v", err)
-		}
-		if len(allowed) == 0 {
-			fail("No chats matched filter: %s", *chatFilter)
-		}
-		filtered := entries[:0]
-		for _, e := range entries {
-			if allowed[e.ChatJID] {
-				filtered = append(filtered, e)
-			}
-		}
-		entries = filtered
-	}
-
-	fmt.Printf("Found %d undownloaded %s item(s)\n", len(entries), *mediaType)
 	if *dryRun {
-		for i, e := range entries {
-			fmt.Printf("  [%d] %s in %s (%d bytes)\n", i+1, e.ID, e.ChatJID, e.FileLength)
+		for i, e := range todo {
+			fmt.Printf("  [%d] %s %s in %s (%d bytes, %s)\n", i+1, e.Kind.Name, e.ID, e.ChatName, e.FileLength, e.Timestamp.Format("2006-01-02"))
 		}
 		return
 	}
-	if len(entries) == 0 {
+	if len(todo) == 0 {
 		return
 	}
 
@@ -157,70 +135,283 @@ func main() {
 	defer client.Disconnect()
 
 	var stats downloadStats
-	for start := 0; start < len(entries); start += batchSize {
+	for start := 0; start < len(todo); start += batchSize {
 		if ctx.Err() != nil {
-			stats.skipped += len(entries) - start
+			stats.skipped += len(todo) - start
 			break
 		}
-		end := min(start+batchSize, len(entries))
-		processBatch(ctx, client, entries[start:end], start, len(entries), *outputDir, *retryTimeout, messagesDBPath, &stats)
+		end := min(start+batchSize, len(todo))
+		processBatch(ctx, client, todo[start:end], start, len(todo), *outputDir, *retryTimeout, *retryInterval, &stats)
 	}
 	fmt.Printf("\nDone. Downloaded: %d, Retried: %d, Failed: %d, Skipped: %d\n",
 		stats.downloaded, stats.retried, stats.failed, stats.skipped)
 }
 
-func loadUndownloadedMedia(dbPath, mediaType string, limit int) ([]MediaEntry, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+// ---------------------------------------------------------------------------
+// Media listing
+// ---------------------------------------------------------------------------
+
+// MediaKind maps a WhatsApp Desktop ZMESSAGETYPE to a download type.
+type MediaKind struct {
+	Name        string
+	MessageType int
+	MediaType   whatsmeow.MediaType
+	Extension   string
+}
+
+var mediaKinds = []MediaKind{
+	{"image", 1, whatsmeow.MediaImage, ".jpg"},
+	{"video", 2, whatsmeow.MediaVideo, ".mp4"},
+	{"audio", 3, whatsmeow.MediaAudio, ".ogg"},
+	{"document", 8, whatsmeow.MediaDocument, ".bin"},
+	{"sticker", 15, whatsmeow.MediaImage, ".webp"},
+}
+
+func parseKinds(value string) ([]MediaKind, error) {
+	if strings.TrimSpace(value) == "all" {
+		return mediaKinds, nil
+	}
+	var kinds []MediaKind
+	for _, name := range strings.Split(value, ",") {
+		name = strings.ToLower(strings.TrimSpace(name))
+		found := false
+		for _, k := range mediaKinds {
+			if k.Name == name {
+				kinds = append(kinds, k)
+				found = true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("unsupported media type %q (use image, video, audio, document, sticker, or all)", name)
+		}
+	}
+	return kinds, nil
+}
+
+// MediaEntry is one undownloaded media item.
+type MediaEntry struct {
+	ID            string
+	ChatJID       string
+	ChatName      string
+	SenderJID     string
+	IsFromMe      bool
+	Kind          MediaKind
+	DirectPath    string
+	MediaKey      []byte
+	FileEncSHA256 []byte
+	FileLength    int64
+	Filename      string
+	Timestamp     time.Time
+}
+
+func openReadOnly(path string) (*sql.DB, error) {
+	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
-
-	query := `SELECT id, chat_jid, sender, media_type, direct_path, mime_type,
-	                 media_key, file_sha256, file_enc_sha256, file_length, timestamp
-	          FROM messages
-	          WHERE media_type = ?
-	            AND (local_path IS NULL OR local_path = '')
-	            AND direct_path IS NOT NULL
-	            AND media_key IS NOT NULL
-	          ORDER BY timestamp DESC`
-	args := []any{mediaType}
-	if limit > 0 {
-		query += " LIMIT ?"
-		args = append(args, limit)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
 	}
+	return db, nil
+}
 
-	rows, err := db.Query(query, args...)
+func isStatusChat(jid string) bool {
+	return jid == "status@broadcast" || strings.HasSuffix(jid, "@status") || strings.HasSuffix(jid, ".status")
+}
+
+func loadMedia(db *sql.DB, kinds []MediaKind, chatFilter string, includeStatus bool) ([]MediaEntry, error) {
+	byType := map[int]MediaKind{}
+	placeholders := make([]string, len(kinds))
+	args := make([]any, len(kinds))
+	for i, k := range kinds {
+		byType[k.MessageType] = k
+		placeholders[i] = "?"
+		args[i] = k.MessageType
+	}
+	rows, err := db.Query(`
+		SELECT m.ZSTANZAID, c.ZCONTACTJID, COALESCE(c.ZPARTNERNAME, ''), COALESCE(gm.ZMEMBERJID, ''),
+		       m.ZISFROMME, m.ZMESSAGETYPE, CAST(m.ZMESSAGEDATE + `+fmt.Sprint(coreDataEpoch)+` AS INTEGER),
+		       mi.ZMEDIAURL, mi.ZMEDIAKEY, COALESCE(mi.ZFILESIZE, 0), COALESCE(mi.ZTITLE, '')
+		FROM ZWAMEDIAITEM mi
+		JOIN ZWAMESSAGE m ON mi.ZMESSAGE = m.Z_PK
+		JOIN ZWACHATSESSION c ON m.ZCHATSESSION = c.Z_PK
+		LEFT JOIN ZWAGROUPMEMBER gm ON m.ZGROUPMEMBER = gm.Z_PK
+		WHERE m.ZMESSAGETYPE IN (`+strings.Join(placeholders, ",")+`)
+		  AND mi.ZMEDIALOCALPATH IS NULL
+		  AND mi.ZMEDIAKEY IS NOT NULL
+		  AND mi.ZMEDIAURL IS NOT NULL
+		  AND m.ZSTANZAID IS NOT NULL
+		ORDER BY m.ZMESSAGEDATE DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	filter := newChatFilter(chatFilter)
 	var entries []MediaEntry
 	for rows.Next() {
 		var e MediaEntry
-		var sender, mime sql.NullString
-		var length sql.NullInt64
-		var ts sql.NullTime
-		if err := rows.Scan(&e.ID, &e.ChatJID, &sender, &e.MediaType, &e.DirectPath, &mime,
-			&e.MediaKey, &e.FileSHA256, &e.FileEncSHA256, &length, &ts); err != nil {
+		var messageType int
+		var unixTime int64
+		var mediaURL string
+		var keyBlob []byte
+		if err := rows.Scan(&e.ID, &e.ChatJID, &e.ChatName, &e.SenderJID, &e.IsFromMe, &messageType, &unixTime,
+			&mediaURL, &keyBlob, &e.FileLength, &e.Filename); err != nil {
 			return nil, err
 		}
-		e.Sender, e.MimeType, e.FileLength, e.Timestamp = sender.String, mime.String, length.Int64, ts.Time
+		if !includeStatus && isStatusChat(e.ChatJID) {
+			continue
+		}
+		if !filter.matches(e.ChatJID, e.ChatName) {
+			continue
+		}
+		directPath, ok := directPathFromURL(mediaURL)
+		if !ok {
+			continue // link previews and other non-WhatsApp URLs
+		}
+		mediaKey, encHash, ok := parseMediaKey(keyBlob)
+		if !ok {
+			continue
+		}
+		e.Kind = byType[messageType]
+		e.DirectPath, e.MediaKey, e.FileEncSHA256 = directPath, mediaKey, encHash
+		e.Timestamp = time.Unix(unixTime, 0)
+		if e.ChatName == "" {
+			e.ChatName = e.ChatJID
+		}
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
 }
+
+// directPathFromURL turns a WhatsApp CDN URL into the direct path whatsmeow
+// downloads from (path plus query).
+func directPathFromURL(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || !strings.HasSuffix(u.Hostname(), ".whatsapp.net") || !strings.HasPrefix(u.Path, "/") {
+		return "", false
+	}
+	if u.RawQuery == "" {
+		return u.EscapedPath(), true
+	}
+	return u.EscapedPath() + "?" + u.RawQuery, true
+}
+
+// ---------------------------------------------------------------------------
+// Chat filter
+// ---------------------------------------------------------------------------
+
+type chatFilter struct {
+	terms []string
+}
+
+func newChatFilter(value string) chatFilter {
+	var terms []string
+	for _, t := range strings.Split(value, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			terms = append(terms, t)
+		}
+	}
+	return chatFilter{terms}
+}
+
+func digitsOf(s string) string {
+	return strings.TrimLeft(strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, s), "0")
+}
+
+func looksLikePhone(s string) bool {
+	for _, r := range s {
+		if !strings.ContainsRune("+0123456789 -().", r) {
+			return false
+		}
+	}
+	return len(digitsOf(s)) >= 7
+}
+
+func (f chatFilter) matches(jid, name string) bool {
+	if len(f.terms) == 0 {
+		return true
+	}
+	user := strings.Split(jid, "@")[0]
+	for _, t := range f.terms {
+		switch {
+		case strings.Contains(t, "@"):
+			if t == jid {
+				return true
+			}
+		case looksLikePhone(t):
+			if strings.Contains(user, digitsOf(t)) {
+				return true
+			}
+		default:
+			if strings.Contains(strings.ToLower(name), strings.ToLower(t)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// Output paths
+// ---------------------------------------------------------------------------
+
+func sanitizePath(s string) string {
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`/\:*?"<>|`, r) {
+			return '_'
+		}
+		return r
+	}, s)
+}
+
+// targetPath must stay in sync with messages_cli/whatsapp_db.py, which looks
+// files up as <output>/<sanitized chat JID>/<sanitized message ID>.*.
+func targetPath(outputDir string, e MediaEntry) string {
+	ext := e.Kind.Extension
+	if e.Kind.Name == "document" {
+		if docExt := filepath.Ext(e.Filename); docExt != "" && len(docExt) <= 6 {
+			ext = strings.ToLower(docExt)
+		}
+	}
+	return filepath.Join(outputDir, sanitizePath(e.ChatJID), sanitizePath(e.ID)+ext)
+}
+
+// ---------------------------------------------------------------------------
+// Downloading
+// ---------------------------------------------------------------------------
+
+type retryResult struct {
+	DirectPath string
+	Err        error
+}
+
+type pendingRetry struct {
+	entry  MediaEntry
+	doneCh chan retryResult
+}
+
+var (
+	pendingRetries   = make(map[string]*pendingRetry)
+	pendingRetriesMu sync.Mutex
+)
 
 type downloadStats struct {
 	downloaded, retried, failed, skipped int
 }
 
 type batchItem struct {
-	idx        int
-	entry      MediaEntry
-	targetPath string
-	doneCh     chan retryResult
+	idx    int
+	entry  MediaEntry
+	path   string
+	doneCh chan retryResult
 }
 
 func shortID(id string) string {
@@ -231,7 +422,7 @@ func shortID(id string) string {
 }
 
 func processBatch(ctx context.Context, client *whatsmeow.Client, batch []MediaEntry, offset, total int,
-	outputDir string, retryTimeout time.Duration, messagesDBPath string, stats *downloadStats) {
+	outputDir string, retryTimeout, retryInterval time.Duration, stats *downloadStats) {
 	// Phase 1: direct downloads, collecting items whose CDN link expired.
 	var needRetry []batchItem
 	for i, entry := range batch {
@@ -240,25 +431,13 @@ func processBatch(ctx context.Context, client *whatsmeow.Client, batch []MediaEn
 			return
 		}
 		idx := offset + i + 1
-		fmt.Printf("[%d/%d] %s... ", idx, total, shortID(entry.ID))
-
-		chatDir := filepath.Join(outputDir, sanitizePath(entry.ChatJID))
-		if err := os.MkdirAll(chatDir, 0o700); err != nil {
-			fmt.Println("FAILED (mkdir)")
-			stats.failed++
-			continue
-		}
-		targetPath := filepath.Join(chatDir, sanitizePath(entry.ID)+extensionForMime(entry.MimeType))
-		if _, err := os.Stat(targetPath); err == nil {
-			fmt.Println("SKIP (exists)")
-			stats.skipped++
-			continue
-		}
+		path := targetPath(outputDir, entry)
+		fmt.Printf("[%d/%d] %s %s in %s... ", idx, total, entry.Kind.Name, shortID(entry.ID), entry.ChatName)
 
 		data, err := download(ctx, client, entry, entry.DirectPath)
 		switch {
 		case err == nil:
-			if saveFile(targetPath, data, messagesDBPath, entry) {
+			if saveFile(path, data) {
 				fmt.Printf("OK (%d bytes)\n", len(data))
 				stats.downloaded++
 			} else {
@@ -266,8 +445,8 @@ func processBatch(ctx context.Context, client *whatsmeow.Client, batch []MediaEn
 				stats.failed++
 			}
 		case isExpiredError(err):
-			fmt.Println("expired")
-			needRetry = append(needRetry, batchItem{idx: idx, entry: entry, targetPath: targetPath})
+			fmt.Println("expired, will ask the phone")
+			needRetry = append(needRetry, batchItem{idx: idx, entry: entry, path: path})
 		default:
 			fmt.Printf("FAILED (%v)\n", err)
 			stats.failed++
@@ -282,24 +461,10 @@ func processBatch(ctx context.Context, client *whatsmeow.Client, batch []MediaEn
 	for i := range needRetry {
 		item := &needRetry[i]
 		item.doneCh = make(chan retryResult, 1)
-
-		chatJID, err := types.ParseJID(item.entry.ChatJID)
+		info, err := messageInfo(client, item.entry)
 		if err != nil {
 			item.doneCh <- retryResult{Err: err}
 			continue
-		}
-		senderJID := chatJID
-		if parsed, err := types.ParseJID(item.entry.Sender); err == nil && item.entry.Sender != "" {
-			senderJID = parsed
-		}
-		info := &types.MessageInfo{
-			MessageSource: types.MessageSource{
-				Chat:    chatJID,
-				Sender:  senderJID,
-				IsGroup: chatJID.Server == types.GroupServer,
-			},
-			ID:        types.MessageID(item.entry.ID),
-			Timestamp: item.entry.Timestamp,
 		}
 
 		pendingRetriesMu.Lock()
@@ -310,7 +475,10 @@ func processBatch(ctx context.Context, client *whatsmeow.Client, batch []MediaEn
 			forgetRetry(item.entry.ID)
 			item.doneCh <- retryResult{Err: err}
 		}
-		time.Sleep(100 * time.Millisecond) // spacing between receipts to avoid rate limits
+		select {
+		case <-ctx.Done():
+		case <-time.After(retryInterval):
+		}
 	}
 
 	// Phase 3: wait for the re-upload notifications with one shared deadline.
@@ -332,7 +500,7 @@ func processBatch(ctx context.Context, client *whatsmeow.Client, batch []MediaEn
 				stats.failed++
 				continue
 			}
-			if !saveFile(item.targetPath, data, messagesDBPath, item.entry) {
+			if !saveFile(item.path, data) {
 				fmt.Printf("  [%d/%d] %s WRITE FAILED\n", item.idx, total, shortID(item.entry.ID))
 				stats.failed++
 				continue
@@ -345,11 +513,37 @@ func processBatch(ctx context.Context, client *whatsmeow.Client, batch []MediaEn
 			if ctx.Err() != nil {
 				stats.skipped++
 			} else {
-				fmt.Printf("  [%d/%d] %s TIMED OUT\n", item.idx, total, shortID(item.entry.ID))
+				fmt.Printf("  [%d/%d] %s TIMED OUT (is the phone online?)\n", item.idx, total, shortID(item.entry.ID))
 				stats.failed++
 			}
 		}
 	}
+}
+
+func messageInfo(client *whatsmeow.Client, e MediaEntry) (*types.MessageInfo, error) {
+	chat, err := types.ParseJID(e.ChatJID)
+	if err != nil {
+		return nil, err
+	}
+	sender := chat
+	switch {
+	case e.IsFromMe && client.Store.ID != nil:
+		sender = client.Store.ID.ToNonAD()
+	case e.SenderJID != "":
+		if parsed, err := types.ParseJID(e.SenderJID); err == nil {
+			sender = parsed
+		}
+	}
+	return &types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat:     chat,
+			Sender:   sender,
+			IsFromMe: e.IsFromMe,
+			IsGroup:  chat.Server == types.GroupServer,
+		},
+		ID:        types.MessageID(e.ID),
+		Timestamp: e.Timestamp,
+	}, nil
 }
 
 func forgetRetry(id string) {
@@ -360,21 +554,32 @@ func forgetRetry(id string) {
 
 // download fetches and decrypts a media file. After a media retry, pass the
 // new direct path; the original media key stays valid.
-func download(ctx context.Context, client *whatsmeow.Client, entry MediaEntry, directPath string) ([]byte, error) {
-	mediaType, err := toWhatsmeowMediaType(entry.MediaType)
-	if err != nil {
-		return nil, err
+//
+// WhatsApp Desktop does not store the plaintext hash. whatsmeow still compares
+// the plaintext against it when allowNoHash is set and returns
+// ErrInvalidMediaSHA256 together with the decrypted data. That comparison runs
+// after the encrypted-file hash and the MAC have been verified, so the data is
+// authentic; the expected size is checked as well.
+func download(ctx context.Context, client *whatsmeow.Client, e MediaEntry, directPath string) ([]byte, error) {
+	data, err := client.DownloadMediaWithPath(ctx, directPath, e.FileEncSHA256, nil, e.MediaKey, e.Kind.MediaType, "", true)
+	if errors.Is(err, whatsmeow.ErrInvalidMediaSHA256) && len(data) > 0 {
+		if e.FileLength > 0 && int64(len(data)) != e.FileLength {
+			return nil, fmt.Errorf("decrypted size %d does not match expected %d", len(data), e.FileLength)
+		}
+		return data, nil
 	}
-	return client.DownloadMediaWithPath(ctx, directPath, entry.FileEncSHA256, entry.FileSHA256,
-		entry.MediaKey, mediaType, "", false)
+	return data, err
 }
 
-func saveFile(path string, data []byte, messagesDBPath string, entry MediaEntry) bool {
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+func saveFile(path string, data []byte) bool {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false
 	}
-	updateLocalPath(messagesDBPath, entry.ID, entry.ChatJID, path)
-	return true
+	tmp := path + ".part"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return false
+	}
+	return os.Rename(tmp, path) == nil
 }
 
 func handleMediaRetry(evt *events.MediaRetry) {
@@ -404,113 +609,4 @@ func isExpiredError(err error) bool {
 	return errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith404) ||
 		errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith410) ||
 		errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith403)
-}
-
-func toWhatsmeowMediaType(mediaType string) (whatsmeow.MediaType, error) {
-	switch strings.ToLower(mediaType) {
-	case "image":
-		return whatsmeow.MediaImage, nil
-	case "video":
-		return whatsmeow.MediaVideo, nil
-	case "audio":
-		return whatsmeow.MediaAudio, nil
-	case "document":
-		return whatsmeow.MediaDocument, nil
-	default:
-		return "", fmt.Errorf("unsupported media type: %s (use image, video, audio, or document)", mediaType)
-	}
-}
-
-func extensionForMime(mime string) string {
-	switch {
-	case strings.Contains(mime, "jpeg") || strings.Contains(mime, "jpg"):
-		return ".jpg"
-	case strings.Contains(mime, "png"):
-		return ".png"
-	case strings.Contains(mime, "webp"):
-		return ".webp"
-	case strings.Contains(mime, "gif"):
-		return ".gif"
-	case strings.Contains(mime, "mp4"):
-		return ".mp4"
-	case strings.Contains(mime, "ogg"):
-		return ".ogg"
-	case strings.Contains(mime, "pdf"):
-		return ".pdf"
-	default:
-		return ".bin"
-	}
-}
-
-func sanitizePath(s string) string {
-	return strings.Map(func(r rune) rune {
-		if strings.ContainsRune(`/\:*?"<>|`, r) {
-			return '_'
-		}
-		return r
-	}, s)
-}
-
-func updateLocalPath(dbPath, msgID, chatJID, localPath string) {
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return
-	}
-	defer db.Close()
-	_, _ = db.Exec("UPDATE messages SET local_path = ?, downloaded_at = ? WHERE id = ? AND chat_jid = ?",
-		localPath, time.Now(), msgID, chatJID)
-}
-
-// resolveChatFilter maps comma-separated phone numbers or JIDs to chat JIDs in messages.db.
-func resolveChatFilter(dbPath, filter string) (map[string]bool, error) {
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	rows, err := db.Query("SELECT DISTINCT chat_jid FROM messages WHERE chat_jid IS NOT NULL")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var allJIDs []string
-	for rows.Next() {
-		var jid string
-		if err := rows.Scan(&jid); err != nil {
-			return nil, err
-		}
-		allJIDs = append(allJIDs, jid)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	result := make(map[string]bool)
-	for _, term := range strings.Split(filter, ",") {
-		term = strings.TrimSpace(term)
-		if term == "" {
-			continue
-		}
-		if strings.Contains(term, "@") {
-			result[term] = true
-			continue
-		}
-		digits := strings.Map(func(r rune) rune {
-			if r >= '0' && r <= '9' {
-				return r
-			}
-			return -1
-		}, term)
-		digits = strings.TrimLeft(digits, "0")
-		if len(digits) < 7 {
-			continue
-		}
-		for _, jid := range allJIDs {
-			if strings.Contains(strings.Split(jid, "@")[0], digits) {
-				result[jid] = true
-			}
-		}
-	}
-	return result, nil
 }

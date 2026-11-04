@@ -40,17 +40,19 @@ messages auth whatsapp
 
 This creates a session at `~/.whatsapp-cli/whatsapp.db`. You only need to do this once.
 
-### Downloading expired WhatsApp media
+### Downloading WhatsApp media
 
-`wa-media` downloads media whose CDN links have expired by asking your phone to re-upload it. It reads undownloaded items from `~/.whatsapp-cli/messages.db` and saves files to `~/.whatsapp-cli/media/<chat>/`.
+WhatsApp Desktop does not download every photo, video, voice note, document, or sticker. `wa-media` fetches the missing ones. It lists them from WhatsApp Desktop's database (read-only) and downloads each from the WhatsApp CDN. When a link has expired, it asks your phone to re-upload the file, so the phone must be online. Files are saved to `~/.whatsapp-cli/media/<chat>/`, and `messages read` shows them like any other attachment. Media that has not been downloaded appears as `[image: not downloaded]`.
 
 ```bash
-~/.local/share/messages-cli/bin/wa-media --dry-run              # list undownloaded images
-~/.local/share/messages-cli/bin/wa-media --type video --limit 20
-~/.local/share/messages-cli/bin/wa-media --chat "+41 79 123 45 67"
+~/.local/share/messages-cli/bin/wa-media --dry-run                     # list what is missing
+~/.local/share/messages-cli/bin/wa-media --chat "Family Group"         # newest 20 images in one chat
+~/.local/share/messages-cli/bin/wa-media --type image,video --limit 50
 ```
 
-`--type` accepts `image`, `video`, `audio`, or `document`. `--chat` accepts phone numbers or JIDs, comma-separated. Your phone must be online for re-uploads.
+`--type` accepts `image`, `video`, `audio`, `document`, `sticker`, or `all`. `--chat` accepts names, phone numbers, or JIDs, comma-separated. Status updates are skipped unless you pass `--include-status`, because phones usually delete them after 24 hours.
+
+whatsmeow is an unofficial WhatsApp client, and WhatsApp may restrict accounts that show automated, high-volume behavior. Each run therefore processes at most 20 items unless you pass `--limit` (`--limit 0` means all), and re-upload requests are sent one per second (`--retry-interval`). Prefer small runs scoped to the chats you care about.
 
 ### Messenger setup
 
