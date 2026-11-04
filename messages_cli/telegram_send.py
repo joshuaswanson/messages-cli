@@ -7,11 +7,15 @@ separate login is needed -- if you're logged into Telegram.app, sending works.
 
 from __future__ import annotations
 
+import functools
 import plistlib
 
 from telethon import TelegramClient
 from telethon.crypto import AuthKey
 from telethon.sessions import MemorySession
+
+from .models import BackendError
+from .telegram_db import get_db
 
 # Official macOS Telegram values (public in source)
 _API_ID = 2834
@@ -27,21 +31,15 @@ _DC_ADDRESSES = {
 }
 
 
+@functools.cache
 def _extract_auth_keys() -> dict[int, bytes]:
     """Extract persistent auth keys from the Telegram postbox t1 table.
 
     Returns {dc_id: auth_key_bytes} for standard DCs (1-5) with persistent keys.
     """
-    from .telegram_db import TelegramDB
-
-    tg = TelegramDB()
-    tg._ensure_connection()
-    conn = tg._conn
-
-    row = conn.execute(
+    row = get_db().conn.execute(
         "SELECT value FROM t1 WHERE key = ?", (b"persistent:datacenterAuthInfoById",)
     ).fetchone()
-    tg.close()
 
     if not row:
         return {}
@@ -54,7 +52,7 @@ def _extract_auth_keys() -> dict[int, bytes]:
 
     root = objects[1]
     results = {}
-    for key_uid, val_uid in zip(root["NS.keys"], root["NS.objects"]):
+    for key_uid, val_uid in zip(root["NS.keys"], root["NS.objects"], strict=True):
         dc_id = resolve(key_uid)
         if not isinstance(dc_id, int) or dc_id not in _DC_ADDRESSES:
             continue
@@ -79,9 +77,7 @@ async def _get_client() -> TelegramClient:
     """Create a TelegramClient using the auth key from the local Telegram database."""
     keys = _extract_auth_keys()
     if not keys:
-        raise RuntimeError(
-            "No Telegram auth keys found. Is Telegram installed and logged in?"
-        )
+        raise BackendError("No Telegram auth keys found. Is Telegram installed and logged in?")
 
     # Try each DC's persistent key until one is authorized
     for dc_id in (2, 1, 4, 5, 3):
@@ -102,15 +98,16 @@ async def _get_client() -> TelegramClient:
 
         await client.disconnect()
 
-    raise RuntimeError(
+    raise BackendError(
         "Telegram auth keys found but none are authorized. "
         "Try logging out and back into Telegram.app."
     )
 
 
-def is_available() -> bool:
-    """Check if we can extract auth keys from the local Telegram database."""
-    return bool(_extract_auth_keys())
+def unavailable_reason() -> str | None:
+    if not _extract_auth_keys():
+        return "No Telegram auth keys found. Is Telegram installed and logged in?"
+    return None
 
 
 def _resolve_entity_hint(peer_id: int) -> str | None:
@@ -119,11 +116,7 @@ def _resolve_entity_hint(peer_id: int) -> str | None:
     Telethon can't resolve raw peer_ids without an access_hash cache,
     so we look up a phone or username to use as the entity identifier.
     """
-    from .telegram_db import TelegramDB
-
-    tdb = TelegramDB()
-    peer = tdb._get_peer(peer_id)
-    tdb.close()
+    peer = get_db().get_peer(peer_id)
 
     if peer.get("phone"):
         phone = peer["phone"]
@@ -137,7 +130,7 @@ async def send_message(peer_id: int, text: str) -> str:
     """Send a message to a Telegram peer. Returns confirmation string."""
     hint = _resolve_entity_hint(peer_id)
     if not hint:
-        raise RuntimeError(
+        raise BackendError(
             f"Cannot send to peer {peer_id}: no phone number or username found."
         )
 

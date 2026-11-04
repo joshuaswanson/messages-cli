@@ -1,37 +1,37 @@
 """Send WhatsApp messages via the wa-send Go binary (whatsmeow)."""
 
 import subprocess
-import sys
-from pathlib import Path
 
-from .utils import WHATSAPP_SESSION_DIR
+from .models import BackendError
+from .utils import WHATSAPP_SESSION_DIR, find_tool
 
-SESSION_DIR = WHATSAPP_SESSION_DIR
-
-# The wa-send binary lives next to wa-media-tool in the project
-_WA_SEND_BIN = Path(__file__).parent.parent / "wa-send-tool" / "wa-send"
+_SESSION_DB = WHATSAPP_SESSION_DIR / "whatsapp.db"
 
 
-def is_available() -> bool:
-    """Check if a WhatsApp session exists and the send binary is built."""
-    session_db = SESSION_DIR / "whatsapp.db"
-    return session_db.exists() and _WA_SEND_BIN.exists()
+def unavailable_reason() -> str | None:
+    if find_tool("wa-send") is None:
+        return "wa-send is not built. Run 'messages setup'."
+    if not _SESSION_DB.exists():
+        return "No WhatsApp session. Run 'messages auth whatsapp'."
+    return None
 
 
 def send_message(jid: str, text: str) -> str:
-    """Send a WhatsApp message to a JID via the wa-send binary."""
-    if not _WA_SEND_BIN.exists():
-        raise RuntimeError(
-            f"wa-send binary not found at {_WA_SEND_BIN}. "
-            "Build it with: cd wa-send-tool && go build -o wa-send"
+    """Send a WhatsApp message to a JID. The text goes through stdin."""
+    if reason := unavailable_reason():
+        raise BackendError(reason)
+    binary = find_tool("wa-send")
+    assert binary is not None
+    try:
+        result = subprocess.run(
+            [str(binary), "--session", str(WHATSAPP_SESSION_DIR), "--to", jid],
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
-    result = subprocess.run(
-        [str(_WA_SEND_BIN), "--session", str(SESSION_DIR), "--to", jid, "--message", text],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    except subprocess.TimeoutExpired as e:
+        raise BackendError("wa-send timed out") from e
     if result.returncode != 0:
-        err = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"wa-send error: {err}")
+        raise BackendError(f"wa-send error: {result.stderr.strip() or result.stdout.strip()}")
     return "Message sent."

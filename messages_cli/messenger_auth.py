@@ -8,9 +8,10 @@ import json
 import sys
 import threading
 import time
-from pathlib import Path
 
-COOKIES_PATH = Path.home() / ".config/messages-cli/messenger_cookies.json"
+from .messenger_api import COOKIES_PATH
+from .models import BackendError
+
 REQUIRED_COOKIES = {"c_user", "xs", "datr", "sb"}
 
 
@@ -18,7 +19,6 @@ def _get_webkit_cookies(window) -> dict[str, str]:
     """Extract cookies from the WebKit cookie store via pyobjc."""
     try:
         from WebKit import WKWebsiteDataStore
-        import objc
 
         cookies = {}
         done = threading.Event()
@@ -47,13 +47,8 @@ def run_auth() -> None:
     """Open a browser window for Messenger login and extract cookies."""
     try:
         import webview
-    except ImportError:
-        print(
-            "pywebview is required for Messenger auth.\n"
-            "Install it with: uv add pywebview",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    except ImportError as e:
+        raise BackendError("pywebview is required for Messenger auth.") from e
 
     cookies_found = {}
     auth_done = False
@@ -94,8 +89,7 @@ def run_auth() -> None:
         print("Authenticated successfully!")
         print(f"Cookies saved to {COOKIES_PATH}")
     else:
-        print("Authentication cancelled or failed.", file=sys.stderr)
-        sys.exit(1)
+        raise BackendError("Authentication cancelled or failed.")
 
 
 def _save_cookies(cookies: dict) -> None:

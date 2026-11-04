@@ -1,478 +1,305 @@
-"""SQLite queries for WhatsApp Desktop database (macOS native app)."""
+"""Read the WhatsApp Desktop (native macOS app) databases."""
 
+from __future__ import annotations
+
+import functools
 import re
 import sqlite3
-import sys
 from pathlib import Path
 
-from .utils import format_phone, format_ts
+from .models import BackendError, Chat, Message, SearchHit
+from .utils import (
+    COREDATA_EPOCH,
+    choose_chat,
+    format_phone,
+    format_ts,
+    like_pattern,
+    looks_like_phone,
+)
 
-# WhatsApp Desktop stores data in Group Containers
+PLATFORM = "whatsapp"
 _WA_CONTAINER = Path.home() / "Library/Group Containers/group.net.whatsapp.WhatsApp.shared"
 CHAT_DB = _WA_CONTAINER / "ChatStorage.sqlite"
 CONTACTS_DB = _WA_CONTAINER / "ContactsV2.sqlite"
 _MEDIA_BASE = _WA_CONTAINER / "Message"
 
-# CoreData epoch: seconds between 1970-01-01 and 2001-01-01
-COREDATA_EPOCH = 978307200
+_MEDIA_LABELS = {1: "image", 2: "video", 3: "audio", 5: "location", 8: "document", 15: "sticker"}
+_IMAGE_TYPE = 1
+_ACTIVE_SESSION = "ZREMOVED = 0 AND ZHIDDEN = 0"
 
 
 def is_available() -> bool:
-    """Check if WhatsApp Desktop database exists."""
     return CHAT_DB.exists()
 
 
-def _connect_chat_db() -> sqlite3.Connection:
-    try:
-        conn = sqlite3.connect(str(CHAT_DB))
-        conn.execute("SELECT 1 FROM ZWACHATSESSION LIMIT 1")
-    except sqlite3.OperationalError:
-        print(
-            "Error: Cannot open WhatsApp database. "
-            "Grant Full Disk Access to your terminal in "
-            "System Settings > Privacy & Security > Full Disk Access.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+def _ts_expr(col: str = "m.ZMESSAGEDATE") -> str:
+    """SQL expression converting a CoreData timestamp to unix seconds."""
+    return f"CAST({col} + {COREDATA_EPOCH} AS INTEGER)"
+
+
+def _open_readonly(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def _connect_contacts_db() -> sqlite3.Connection | None:
+@functools.cache
+def _chat_db() -> sqlite3.Connection:
+    try:
+        conn = _open_readonly(CHAT_DB)
+        conn.execute("SELECT 1 FROM ZWACHATSESSION LIMIT 1")
+    except sqlite3.Error as e:
+        raise BackendError(
+            "Cannot open the WhatsApp database. Grant Full Disk Access to your "
+            "terminal in System Settings > Privacy & Security > Full Disk Access."
+        ) from e
+    return conn
+
+
+@functools.cache
+def _contacts() -> list[sqlite3.Row]:
     if not CONTACTS_DB.exists():
-        return None
+        return []
     try:
-        conn = sqlite3.connect(str(CONTACTS_DB))
-        conn.row_factory = sqlite3.Row
-        return conn
-    except sqlite3.OperationalError:
-        return None
-
-
-def _ts_expr(col: str = "m.ZMESSAGEDATE") -> str:
-    """SQL expression to convert WhatsApp CoreData timestamp to unix seconds."""
-    return f'CAST({col} + {COREDATA_EPOCH} AS INTEGER)'
-
-
-# ---------------------------------------------------------------------------
-# Contact resolution
-# ---------------------------------------------------------------------------
-
-def _build_contact_cache() -> dict[str, str]:
-    """Build a mapping from WhatsApp JID to display name using ContactsV2."""
-    conn = _connect_contacts_db()
-    if not conn:
-        return {}
-    try:
+        conn = _open_readonly(CONTACTS_DB)
         rows = conn.execute(
-            "SELECT ZWHATSAPPID, ZFULLNAME FROM ZWAADDRESSBOOKCONTACT "
-            "WHERE ZWHATSAPPID IS NOT NULL AND ZFULLNAME IS NOT NULL"
+            "SELECT ZWHATSAPPID, ZLID, ZFULLNAME, ZPHONENUMBER FROM ZWAADDRESSBOOKCONTACT"
         ).fetchall()
-        cache = {r["ZWHATSAPPID"]: r["ZFULLNAME"] for r in rows}
         conn.close()
-        return cache
-    except Exception:
-        return {}
+        return rows
+    except sqlite3.Error:
+        return []
 
 
-def _build_jid_to_phone() -> dict[str, str]:
-    """Build a mapping from WhatsApp JID to phone number."""
-    conn = _connect_contacts_db()
-    if not conn:
-        return {}
-    try:
-        rows = conn.execute(
-            "SELECT ZWHATSAPPID, ZPHONENUMBER FROM ZWAADDRESSBOOKCONTACT "
-            "WHERE ZWHATSAPPID IS NOT NULL AND ZPHONENUMBER IS NOT NULL"
-        ).fetchall()
-        result = {r["ZWHATSAPPID"]: r["ZPHONENUMBER"] for r in rows}
-        conn.close()
-        return result
-    except Exception:
-        return {}
+@functools.cache
+def _jid_names() -> dict[str, str]:
+    """Map phone JIDs and LIDs to contact names."""
+    names: dict[str, str] = {}
+    for r in _contacts():
+        if not r["ZFULLNAME"]:
+            continue
+        for jid in (r["ZWHATSAPPID"], r["ZLID"]):
+            if jid:
+                names.setdefault(jid, r["ZFULLNAME"])
+    return names
 
 
-
-def _resolve_chat_name(
-    row: dict,
-    contact_cache: dict[str, str],
-) -> str:
-    """Resolve a chat session row to a display name."""
-    if row["ZPARTNERNAME"]:
-        return row["ZPARTNERNAME"]
-    jid = row["ZCONTACTJID"] or ""
-    if jid in contact_cache:
-        return contact_cache[jid]
-    return jid
+@functools.cache
+def _jid_phones() -> dict[str, str]:
+    return {r["ZWHATSAPPID"]: r["ZPHONENUMBER"] for r in _contacts() if r["ZWHATSAPPID"] and r["ZPHONENUMBER"]}
 
 
-# ---------------------------------------------------------------------------
-# LID resolution (for group message senders)
-# ---------------------------------------------------------------------------
-
-_lid_cache: dict[str, str] | None = None
-
-
-def _build_lid_cache() -> dict[str, str]:
-    """Build mapping from LID JIDs to display names using the contacts DB."""
-    global _lid_cache
-    if _lid_cache is not None:
-        return _lid_cache
-    conn = _connect_contacts_db()
-    if not conn:
-        _lid_cache = {}
-        return _lid_cache
-    try:
-        rows = conn.execute(
-            "SELECT ZLID, ZFULLNAME FROM ZWAADDRESSBOOKCONTACT "
-            "WHERE ZLID IS NOT NULL AND ZLID != '' AND ZFULLNAME IS NOT NULL AND ZFULLNAME != ''"
-        ).fetchall()
-        _lid_cache = {r["ZLID"]: r["ZFULLNAME"] for r in rows}
-        conn.close()
-        return _lid_cache
-    except Exception:
-        _lid_cache = {}
-        return _lid_cache
+def _jid_phone(jid: str) -> str:
+    phone = _jid_phones().get(jid, "")
+    if not phone and jid.endswith("@s.whatsapp.net"):
+        phone = "+" + jid.split("@")[0]
+    return format_phone(phone) if phone else ""
 
 
-def _resolve_group_sender(
-    member_jid: str | None,
-    contact_cache: dict[str, str],
-) -> str:
-    """Resolve a group message sender using the ZWAGROUPMEMBER JID."""
+def _member_name(member_jid: str | None, *fallback_names: str | None) -> str:
+    """Address book name, then WhatsApp's own names for the member, then the phone number."""
     if not member_jid:
         return "Unknown"
-    # Try contact cache (works for @s.whatsapp.net JIDs)
-    if member_jid in contact_cache:
-        return contact_cache[member_jid]
-    # Try LID cache (works for @lid JIDs)
-    if member_jid.endswith("@lid"):
-        lid_cache = _build_lid_cache()
-        if member_jid in lid_cache:
-            return lid_cache[member_jid]
-    # Format the phone number from the JID as fallback
-    jid_base = member_jid.split("@")[0] if "@" in member_jid else member_jid
+    if name := _jid_names().get(member_jid):
+        return name
+    if name := next((n for n in fallback_names if n), None):
+        return name
     if member_jid.endswith("@s.whatsapp.net"):
-        return format_phone(jid_base)
+        return format_phone(member_jid.split("@")[0])
     return member_jid
 
 
+def _chat_name(partner_name: str | None, jid: str) -> str:
+    return partner_name or _jid_names().get(jid) or jid
+
+
 # ---------------------------------------------------------------------------
-# Public API
+# Chats
 # ---------------------------------------------------------------------------
 
-def recent_chats(limit: int = 20) -> list[dict]:
-    """List recent chats sorted by last message date."""
-    conn = _connect_chat_db()
-    contact_cache = _build_contact_cache()
-    jid_to_phone = _build_jid_to_phone()
-    rows = conn.execute(
+_CHAT_COLUMNS = f"""
+    c.Z_PK, c.ZCONTACTJID, c.ZPARTNERNAME,
+    {_ts_expr('c.ZLASTMESSAGEDATE')} AS last_ts,
+    (SELECT COUNT(*) FROM ZWAMESSAGE m WHERE m.ZCHATSESSION = c.Z_PK) AS message_count
+"""
+
+
+def _row_to_chat(r: sqlite3.Row) -> Chat:
+    jid = r["ZCONTACTJID"] or ""
+    return Chat(
+        platform=PLATFORM,
+        id=jid,
+        name=_chat_name(r["ZPARTNERNAME"], jid),
+        last_message=format_ts(r["last_ts"]),
+        phone=_jid_phone(jid),
+        is_group=jid.endswith("@g.us"),
+        message_count=r["message_count"],
+    )
+
+
+def recent_chats(limit: int = 20) -> list[Chat]:
+    rows = _chat_db().execute(
         f"""
-        SELECT c.ZCONTACTJID, c.ZPARTNERNAME, c.ZLASTMESSAGETEXT,
-               {_ts_expr('c.ZLASTMESSAGEDATE')} as last_msg,
-               c.ZSESSIONTYPE,
-               (SELECT COUNT(*) FROM ZWAMESSAGE m WHERE m.ZCHATSESSION = c.Z_PK) as message_count
-        FROM ZWACHATSESSION c
-        WHERE c.ZREMOVED = 0 AND c.ZHIDDEN = 0
+        SELECT {_CHAT_COLUMNS} FROM ZWACHATSESSION c
+        WHERE {_ACTIVE_SESSION}
         ORDER BY c.ZLASTMESSAGEDATE DESC
         LIMIT ?
         """,
         (limit,),
     ).fetchall()
-    conn.close()
-    results = []
-    for r in rows:
-        rd = dict(r)
-        jid = rd["ZCONTACTJID"] or ""
-        name = _resolve_chat_name(rd, contact_cache)
-        phone = jid_to_phone.get(jid, "")
-        if not phone and "@s.whatsapp.net" in jid:
-            phone = "+" + jid.split("@")[0]
-        results.append({
-            "name": name,
-            "jid": jid,
-            "last_message": format_ts(rd["last_msg"]),
-            "phone": phone,
-            "is_group": jid.endswith("@g.us"),
-            "message_count": rd.get("message_count", 0),
-        })
-    return results
+    return [_row_to_chat(r) for r in rows]
 
 
-def find_chats(query: str) -> list[dict]:
-    """Find chats by name, phone number, or JID."""
-    conn = _connect_chat_db()
-    contact_cache = _build_contact_cache()
-    jid_to_phone = _build_jid_to_phone()
-    digits = re.sub(r"\D", "", query)
-
-    # Search by partner name and group subject
-    rows = conn.execute(
+def find_chats(query: str) -> list[Chat]:
+    """Find chats by JID, phone number, chat/group name, or contact name."""
+    query = query.strip()
+    conditions = ["c.ZCONTACTJID = ?"]
+    params: list = [query]
+    if looks_like_phone(query):
+        conditions.append("c.ZCONTACTJID LIKE ? ESCAPE '\\'")
+        params.append(like_pattern(re.sub(r"\D", "", query)))
+    else:
+        conditions.append("c.ZPARTNERNAME LIKE ? ESCAPE '\\'")
+        params.append(like_pattern(query))
+        wanted = query.casefold()
+        contact_jids = [
+            r["ZWHATSAPPID"] for r in _contacts()
+            if r["ZWHATSAPPID"] and r["ZFULLNAME"] and wanted in r["ZFULLNAME"].casefold()
+        ]
+        if contact_jids:
+            conditions.append(f"c.ZCONTACTJID IN ({','.join('?' * len(contact_jids))})")
+            params.extend(contact_jids)
+    rows = _chat_db().execute(
         f"""
-        SELECT ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE,
-               {_ts_expr('ZLASTMESSAGEDATE')} as last_msg
-        FROM ZWACHATSESSION
-        WHERE ZREMOVED = 0 AND ZHIDDEN = 0
-          AND (ZPARTNERNAME LIKE ? OR ZCONTACTJID LIKE ?)
-        ORDER BY ZLASTMESSAGEDATE DESC
-        """,
-        (f"%{query}%", f"%{digits}%" if digits else f"%{query}%"),
-    ).fetchall()
-    conn.close()
-
-    # Also search contacts DB
-    extra_jids = set()
-    contacts_conn = _connect_contacts_db()
-    if contacts_conn:
-        contact_rows = contacts_conn.execute(
-            "SELECT ZWHATSAPPID FROM ZWAADDRESSBOOKCONTACT "
-            "WHERE ZFULLNAME LIKE ? OR ZPHONENUMBER LIKE ?",
-            (f"%{query}%", f"%{digits}%" if digits else f"%{query}%"),
-        ).fetchall()
-        contacts_conn.close()
-        extra_jids = {r["ZWHATSAPPID"] for r in contact_rows if r["ZWHATSAPPID"]}
-
-    seen = set()
-    results = []
-    for r in rows:
-        rd = dict(r)
-        jid = rd["ZCONTACTJID"] or ""
-        if jid in seen:
-            continue
-        seen.add(jid)
-        extra_jids.discard(jid)
-        name = _resolve_chat_name(rd, contact_cache)
-        phone = jid_to_phone.get(jid, "")
-        if not phone and "@s.whatsapp.net" in jid:
-            phone = "+" + jid.split("@")[0]
-        results.append({
-            "name": name,
-            "jid": jid,
-            "phone": phone,
-            "is_group": jid.endswith("@g.us"),
-        })
-
-    # Add contacts that matched but weren't in chat results
-    if extra_jids:
-        conn2 = _connect_chat_db()
-        for jid in extra_jids:
-            if jid in seen:
-                continue
-            row = conn2.execute(
-                f"""
-                SELECT ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE,
-                       {_ts_expr('ZLASTMESSAGEDATE')} as last_msg
-                FROM ZWACHATSESSION
-                WHERE ZCONTACTJID = ? AND ZREMOVED = 0
-                LIMIT 1
-                """,
-                (jid,),
-            ).fetchone()
-            if row:
-                seen.add(jid)
-                rd = dict(row)
-                name = _resolve_chat_name(rd, contact_cache)
-                phone = jid_to_phone.get(jid, "")
-                if not phone and "@s.whatsapp.net" in jid:
-                    phone = "+" + jid.split("@")[0]
-                results.append({
-                    "name": name,
-                    "jid": jid,
-                    "phone": phone,
-                    "is_group": jid.endswith("@g.us"),
-                })
-        conn2.close()
-
-    return results
-
-
-def resolve_identifier(identifier: str) -> str | None:
-    """Resolve a name, phone, or JID to a WhatsApp JID."""
-    # Already a JID
-    if "@" in identifier:
-        return identifier
-    # Try by phone digits
-    digits = re.sub(r"\D", "", identifier)
-    if digits:
-        conn = _connect_chat_db()
-        row = conn.execute(
-            """
-            SELECT ZCONTACTJID FROM ZWACHATSESSION
-            WHERE ZCONTACTJID LIKE ? AND ZREMOVED = 0
-            ORDER BY ZLASTMESSAGEDATE DESC LIMIT 1
-            """,
-            (f"%{digits}%",),
-        ).fetchone()
-        conn.close()
-        if row:
-            return row["ZCONTACTJID"]
-    # Try by name
-    chats = find_chats(identifier)
-    if not chats:
-        return None
-    if len(chats) == 1:
-        return chats[0]["jid"]
-    # Multiple matches - prefer direct 1-on-1 chats over groups
-    direct = [c for c in chats if not c["is_group"]]
-    if len(direct) == 1:
-        return direct[0]["jid"]
-    raise SystemExit(
-        f'Multiple chats match "{identifier}". '
-        "Specify a phone number or JID instead."
-    )
-
-
-def read_messages(jid: str, limit: int = 20) -> list[dict]:
-    """Read messages from a chat by JID."""
-    conn = _connect_chat_db()
-    contact_cache = _build_contact_cache()
-
-    # Get chat session Z_PK and partner name
-    session = conn.execute(
-        "SELECT Z_PK, ZPARTNERNAME, ZCONTACTJID FROM ZWACHATSESSION WHERE ZCONTACTJID = ?",
-        (jid,),
-    ).fetchone()
-    if not session:
-        conn.close()
-        return []
-
-    session_pk = session["Z_PK"]
-    partner_name = session["ZPARTNERNAME"]
-    is_group = jid.endswith("@g.us")
-
-    rows = conn.execute(
-        f"""
-        SELECT {_ts_expr()} as timestamp,
-               m.ZISFROMME, m.ZTEXT,
-               m.ZMESSAGETYPE, m.ZMEDIAITEM,
-               mi.ZMEDIALOCALPATH, mi.ZVCARDNAME, mi.ZTITLE,
-               gm.ZMEMBERJID
-        FROM ZWAMESSAGE m
-        LEFT JOIN ZWAMEDIAITEM mi ON mi.ZMESSAGE = m.Z_PK
-        LEFT JOIN ZWAGROUPMEMBER gm ON m.ZGROUPMEMBER = gm.Z_PK
-        WHERE m.ZCHATSESSION = ?
-        ORDER BY m.ZMESSAGEDATE DESC
-        LIMIT ?
-        """,
-        (session_pk, limit),
-    ).fetchall()
-    conn.close()
-
-    messages = []
-    for r in rows:
-        text = r["ZTEXT"]
-        # Add media info
-        if r["ZMEDIALOCALPATH"]:
-            media_name = r["ZTITLE"] or r["ZVCARDNAME"] or r["ZMEDIALOCALPATH"]
-            media_label = _media_type_label(r["ZMESSAGETYPE"])
-            media_tag = f"[{media_label}: {media_name}]"
-            text = f"{text} {media_tag}" if text else media_tag
-        if not text:
-            continue
-
-        # Resolve sender
-        if r["ZISFROMME"]:
-            sender = "Me"
-        elif not is_group:
-            sender = partner_name or contact_cache.get(jid, jid)
-        else:
-            sender = _resolve_group_sender(r["ZMEMBERJID"], contact_cache)
-
-        # Resolve image path for image messages (type 1)
-        image_paths: list[str] = []
-        if r["ZMESSAGETYPE"] == 1 and r["ZMEDIALOCALPATH"]:
-            full_path = _MEDIA_BASE / r["ZMEDIALOCALPATH"]
-            if full_path.exists():
-                image_paths.append(str(full_path))
-
-        messages.append({
-            "timestamp": format_ts(r["timestamp"]),
-            "sender": sender,
-            "text": text,
-            "edited": False,
-            "is_from_me": bool(r["ZISFROMME"]),
-            "image_paths": image_paths,
-        })
-    return messages
-
-
-def search_messages(query: str, limit: int = 20, jid: str | None = None) -> list[dict]:
-    """Search message content, optionally scoped to a specific chat."""
-    conn = _connect_chat_db()
-    contact_cache = _build_contact_cache()
-    where = "m.ZTEXT LIKE ?"
-    params: list = [f"%{query}%"]
-    if jid:
-        where += " AND c.ZCONTACTJID = ?"
-        params.append(jid)
-    params.append(limit)
-    rows = conn.execute(
-        f"""
-        SELECT {_ts_expr()} as timestamp,
-               c.ZCONTACTJID, c.ZPARTNERNAME,
-               m.ZISFROMME, m.ZTEXT,
-               gm.ZMEMBERJID
-        FROM ZWAMESSAGE m
-        JOIN ZWACHATSESSION c ON m.ZCHATSESSION = c.Z_PK
-        LEFT JOIN ZWAGROUPMEMBER gm ON m.ZGROUPMEMBER = gm.Z_PK
-        WHERE {where}
-        ORDER BY m.ZMESSAGEDATE DESC
-        LIMIT ?
+        SELECT {_CHAT_COLUMNS} FROM ZWACHATSESSION c
+        WHERE {_ACTIVE_SESSION} AND ({' OR '.join(conditions)})
+        ORDER BY c.ZLASTMESSAGEDATE DESC
         """,
         params,
     ).fetchall()
-    conn.close()
+    return [_row_to_chat(r) for r in rows]
 
-    results = []
+
+def resolve_chat(identifier: str, strict: bool = False) -> Chat | None:
+    return choose_chat(identifier, find_chats(identifier), strict)
+
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+
+_MESSAGE_SELECT = f"""
+    SELECT {_ts_expr()} AS timestamp, m.Z_PK, m.ZMESSAGEDATE,
+           m.ZISFROMME, m.ZTEXT, m.ZMESSAGETYPE,
+           mi.ZMEDIALOCALPATH, mi.ZVCARDNAME, mi.ZTITLE,
+           gm.ZMEMBERJID, gm.ZCONTACTNAME, gm.ZFIRSTNAME, p.ZPUSHNAME,
+           c.ZCONTACTJID, c.ZPARTNERNAME
+    FROM ZWAMESSAGE m
+    JOIN ZWACHATSESSION c ON m.ZCHATSESSION = c.Z_PK
+    LEFT JOIN ZWAMEDIAITEM mi ON mi.ZMESSAGE = m.Z_PK
+    LEFT JOIN ZWAGROUPMEMBER gm ON m.ZGROUPMEMBER = gm.Z_PK
+    LEFT JOIN ZWAPROFILEPUSHNAME p ON p.ZJID = gm.ZMEMBERJID
+"""
+
+
+def _row_to_message(r: sqlite3.Row) -> Message | None:
+    text = r["ZTEXT"]
+    if r["ZMEDIALOCALPATH"]:
+        media_name = r["ZTITLE"] or r["ZVCARDNAME"] or r["ZMEDIALOCALPATH"]
+        media_tag = f"[{_MEDIA_LABELS.get(r['ZMESSAGETYPE'], 'media')}: {media_name}]"
+        text = f"{text} {media_tag}" if text else media_tag
+    if not text:
+        return None
+
+    jid = r["ZCONTACTJID"] or ""
+    if r["ZISFROMME"]:
+        sender = "Me"
+    elif jid.endswith("@g.us"):
+        sender = _member_name(r["ZMEMBERJID"], r["ZCONTACTNAME"], r["ZPUSHNAME"], r["ZFIRSTNAME"])
+    else:
+        sender = _chat_name(r["ZPARTNERNAME"], jid)
+
+    image_paths: list[str] = []
+    if r["ZMESSAGETYPE"] == _IMAGE_TYPE and r["ZMEDIALOCALPATH"]:
+        full_path = _MEDIA_BASE / r["ZMEDIALOCALPATH"]
+        if full_path.exists():
+            image_paths.append(str(full_path))
+
+    return Message(
+        id=str(r["Z_PK"]),
+        timestamp=format_ts(r["timestamp"]),
+        sender=sender,
+        text=text,
+        is_from_me=bool(r["ZISFROMME"]),
+        image_paths=image_paths,
+    )
+
+
+def _to_messages(rows: list[sqlite3.Row]) -> list[Message]:
+    return [m for r in rows if (m := _row_to_message(r)) is not None]
+
+
+def read_messages(jid: str, limit: int = 20) -> list[Message]:
+    """Most recent messages in a chat, newest first."""
+    rows = _chat_db().execute(
+        f"{_MESSAGE_SELECT} WHERE c.ZCONTACTJID = ? ORDER BY m.ZMESSAGEDATE DESC LIMIT ?",
+        (jid, limit * 2 + 10),
+    ).fetchall()
+    return _to_messages(rows)[:limit]
+
+
+def read_around(jid: str, message_id: str, count: int) -> list[Message]:
+    """Up to `count` messages before and after a message, in chronological order."""
+    conn = _chat_db()
+    hit = conn.execute("SELECT ZMESSAGEDATE FROM ZWAMESSAGE WHERE Z_PK = ?", (int(message_id),)).fetchone()
+    if hit is None:
+        return []
+    date, pk, window = hit[0], int(message_id), count * 2 + 10
+    before = conn.execute(
+        f"""{_MESSAGE_SELECT}
+        WHERE c.ZCONTACTJID = ? AND (m.ZMESSAGEDATE < ? OR (m.ZMESSAGEDATE = ? AND m.Z_PK <= ?))
+        ORDER BY m.ZMESSAGEDATE DESC, m.Z_PK DESC LIMIT ?""",
+        (jid, date, date, pk, window),
+    ).fetchall()
+    after = conn.execute(
+        f"""{_MESSAGE_SELECT}
+        WHERE c.ZCONTACTJID = ? AND (m.ZMESSAGEDATE > ? OR (m.ZMESSAGEDATE = ? AND m.Z_PK > ?))
+        ORDER BY m.ZMESSAGEDATE ASC, m.Z_PK ASC LIMIT ?""",
+        (jid, date, date, pk, window),
+    ).fetchall()
+    older = _to_messages(before)[: count + 1]
+    newer = _to_messages(after)[:count]
+    return list(reversed(older)) + newer
+
+
+def search_messages(query: str, limit: int = 20, jid: str | None = None) -> list[SearchHit]:
+    """Search message text, newest first."""
+    where = "m.ZTEXT LIKE ? ESCAPE '\\'"
+    params: list = [like_pattern(query)]
+    if jid:
+        where += " AND c.ZCONTACTJID = ?"
+        params.append(jid)
+    rows = _chat_db().execute(
+        f"{_MESSAGE_SELECT} WHERE {where} ORDER BY m.ZMESSAGEDATE DESC LIMIT ?",
+        params + [limit],
+    ).fetchall()
+    hits = []
     for r in rows:
-        rd = dict(r)
-        jid = rd["ZCONTACTJID"] or ""
-        chat_name = rd["ZPARTNERNAME"] or contact_cache.get(jid, jid)
-        is_group = jid.endswith("@g.us")
-
-        if rd["ZISFROMME"]:
-            sender = "Me"
-        elif not is_group:
-            sender = chat_name
-        else:
-            sender = _resolve_group_sender(rd["ZMEMBERJID"], contact_cache)
-
-        results.append({
-            "timestamp": format_ts(rd["timestamp"]),
-            "jid": jid,
-            "chat_name": chat_name,
-            "sender": sender,
-            "text": rd["ZTEXT"],
-            "is_from_me": bool(rd["ZISFROMME"]),
-        })
-    return results
+        m = _row_to_message(r)
+        if m is None:
+            continue
+        chat_jid = r["ZCONTACTJID"] or ""
+        hits.append(SearchHit(
+            **vars(m),
+            platform=PLATFORM,
+            chat_id=chat_jid,
+            chat_name=_chat_name(r["ZPARTNERNAME"], chat_jid),
+        ))
+    return hits
 
 
 def stats() -> dict:
-    """Return message and chat counts."""
-    conn = _connect_chat_db()
-    msg_count = conn.execute("SELECT COUNT(*) FROM ZWAMESSAGE").fetchone()[0]
-    chat_count = conn.execute(
-        "SELECT COUNT(*) FROM ZWACHATSESSION WHERE ZREMOVED = 0 AND ZHIDDEN = 0"
-    ).fetchone()[0]
-    conn.close()
-    return {"messages": msg_count, "chats": chat_count}
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _media_type_label(msg_type: int | None) -> str:
-    """Convert WhatsApp message type to a media label."""
-    labels = {
-        1: "image",
-        2: "video",
-        3: "audio",
-        5: "location",
-        8: "document",
-        15: "sticker",
-    }
-    return labels.get(msg_type, "media")
-
-
+    conn = _chat_db()
+    messages = conn.execute("SELECT COUNT(*) FROM ZWAMESSAGE").fetchone()[0]
+    chats = conn.execute(f"SELECT COUNT(*) FROM ZWACHATSESSION WHERE {_ACTIVE_SESSION}").fetchone()[0]
+    return {"messages": messages, "chats": chats}

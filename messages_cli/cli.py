@@ -1,13 +1,19 @@
 """CLI entry point for messages-cli."""
 
-from datetime import datetime as _datetime
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from datetime import datetime
 
 import click
 
-from . import db, send, backends, whatsapp_auth, messenger_auth
-from .utils import format_phone
+from . import backends, db, messenger_auth, whatsapp_auth
+from .models import BackendError, Chat, Message, SearchHit
+from .utils import INSTALLED_BIN_DIR, format_phone, go_source_dir
 
-# Colors
 DIM = "bright_black"
 SENDER_ME = "green"
 SENDER_OTHER = "cyan"
@@ -22,7 +28,35 @@ PLATFORM_TAGS = {
     "messenger": "fb",
 }
 
-VALID_PLATFORMS = ("messages", "telegram", "whatsapp", "messenger")
+_TAG_RE = re.compile(r"\[[^\[\]]*\]")
+_ATTACHMENT_PREFIXES = ("[image", "[video", "[audio", "[file", "[sticker", "[document", "[location", "[media")
+_REACTION_PREFIXES = tuple(f"[{label}]" for label in db.TAPBACK_TYPES.values())
+
+
+class _Group(click.Group):
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except BackendError as e:
+            raise click.ClickException(str(e)) from e
+
+
+def platform_option(fn):
+    return click.option(
+        "--platform", "-p", type=click.Choice(backends.PLATFORMS), default=None,
+        help="Only use this platform.",
+    )(fn)
+
+
+def json_option(fn):
+    return click.option("--json", "as_json", is_flag=True, help="Print JSON.")(fn)
+
+
+def _print_json(records) -> None:
+    click.echo(json.dumps(
+        [r if isinstance(r, dict) else r.to_dict() for r in records],
+        indent=2, ensure_ascii=False,
+    ))
 
 
 def _truncate(text: str, full: bool) -> str:
@@ -37,75 +71,64 @@ def _truncate(text: str, full: bool) -> str:
 
 
 def _platform_tag(platform: str) -> str:
-    """Return a dim [im] or [tg] tag."""
-    tag = PLATFORM_TAGS.get(platform, platform[:2])
-    return click.style(f"[{tag}]", fg=DIM)
+    return click.style(f"[{PLATFORM_TAGS.get(platform, platform[:2])}]", fg=DIM)
 
 
 def _display_ts(ts: str) -> str:
-    """Format ISO 8601 timestamp for CLI display."""
     try:
-        dt = _datetime.fromisoformat(ts)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         return ts
 
 
-def _validate_platform(ctx, param, value):
-    if value is not None and value not in VALID_PLATFORMS:
-        raise click.BadParameter(f"must be one of: {', '.join(VALID_PLATFORMS)}")
-    return value
+def _style_tag(match: re.Match) -> str:
+    tag = match.group(0)
+    if tag.startswith(_ATTACHMENT_PREFIXES):
+        return click.style(tag, fg=ATTACHMENT)
+    if tag.startswith(_REACTION_PREFIXES):
+        return click.style(tag, fg=REACTION)
+    if tag == "[...]":
+        return click.style(tag, fg=DIM)
+    return tag
 
 
-def platform_option(fn):
-    """Decorator adding --platform/-p to a command."""
-    return click.option(
-        "--platform", "-p", default=None, callback=_validate_platform,
-        expose_value=True, is_eager=False,
-        help="Filter by platform (imessage, telegram).",
-    )(fn)
-
-
-def _format_message(m: dict, full: bool) -> str:
-    ts = click.style(_display_ts(m["timestamp"]), fg=DIM)
-    is_me = m["sender"] == "Me"
-    sender_text = m["sender"] if is_me else format_phone(m["sender"])
-    sender = click.style(sender_text, fg=SENDER_ME if is_me else SENDER_OTHER)
-    if m.get("edited"):
+def _sender(m: Message) -> str:
+    text = m.sender if m.is_from_me else format_phone(m.sender)
+    sender = click.style(text, fg=SENDER_ME if m.is_from_me else SENDER_OTHER)
+    if m.edited:
         sender += click.style(" [edited]", fg=EDITED)
-
-    text = _truncate(m["text"], full)
-    # Colorize attachment and reaction tags
-    parts = []
-    i = 0
-    while i < len(text):
-        bracket_start = text.find("[", i)
-        if bracket_start < 0:
-            parts.append(text[i:])
-            break
-        parts.append(text[i:bracket_start])
-        bracket_end = text.find("]", bracket_start)
-        if bracket_end < 0:
-            parts.append(text[bracket_start:])
-            break
-        tag = text[bracket_start:bracket_end + 1]
-        if tag.startswith("[image:") or tag.startswith("[video:") or tag.startswith("[audio:") or tag.startswith("[file:"):
-            parts.append(click.style(tag, fg=ATTACHMENT))
-        elif tag.startswith("[Loved") or tag.startswith("[Liked") or tag.startswith("[Disliked") or tag.startswith("[Laughed") or tag.startswith("[Emphasized") or tag.startswith("[Questioned"):
-            parts.append(click.style(tag, fg=REACTION))
-        elif tag == "[edited]":
-            parts.append(click.style(tag, fg=EDITED))
-        elif tag == "[...]":
-            parts.append(click.style(tag, fg=DIM))
-        else:
-            parts.append(tag)
-        i = bracket_end + 1
-    text = "".join(parts)
-
-    return f"{ts}  {sender}  {text}"
+    return sender
 
 
-@click.group()
+def _format_message(m: Message, full: bool) -> str:
+    ts = click.style(_display_ts(m.timestamp), fg=DIM)
+    text = _TAG_RE.sub(_style_tag, _truncate(m.text, full))
+    return f"{ts}  {_sender(m)}  {text}"
+
+
+def _format_hit(h: SearchHit, full: bool, show_tag: bool) -> str:
+    ts = click.style(_display_ts(h.timestamp), fg=DIM)
+    chat = click.style(h.chat_name, fg=SENDER_OTHER)
+    tag = f"  {_platform_tag(h.platform)}" if show_tag else ""
+    return f"{ts}  {chat}  {_sender(h)}  {_truncate(h.text, full)}{tag}"
+
+
+def _print_chats(chats: list[Chat], show_tags: bool, show_time: bool) -> None:
+    name_width = max(len(c.name) for c in chats)
+    for c in chats:
+        columns = [click.style(c.name.ljust(name_width), bold=True)]
+        if show_time:
+            columns.append(click.style(_display_ts(c.last_message), fg=DIM))
+        if show_tags:
+            columns.append(_platform_tag(c.platform))
+        if c.username:
+            columns.append(click.style(f"@{c.username}", fg=DIM))
+        if c.phone and c.name != c.phone:
+            columns.append(click.style(c.phone, fg=DIM))
+        click.echo("  ".join(columns))
+
+
+@click.group(cls=_Group)
 def cli():
     """Unified CLI for all your messaging apps."""
 
@@ -120,20 +143,21 @@ def contacts():
 
 @contacts.command("search")
 @click.argument("name")
-def contacts_search(name: str):
-    """Search contacts by name."""
+@json_option
+def contacts_search(name: str, as_json: bool):
+    """Search macOS Contacts by name."""
     results = db.search_contacts(name)
+    if as_json:
+        _print_json(results)
+        return
     if not results:
         click.echo("No contacts found.")
         return
     for c in results:
-        first = c["first"] or ""
-        last = c["last"] or ""
-        name_str = click.style(f"{first} {last}".strip(), bold=True)
-        click.echo(name_str)
-        for phone in c["phones"]:
+        click.echo(click.style(c.name, bold=True))
+        for phone in c.phones:
             click.echo(f"  {click.style('phone:', fg=DIM)} {format_phone(phone)}")
-        for email in c["emails"]:
+        for email in c.emails:
             click.echo(f"  {click.style('email:', fg=DIM)} {email}")
 
 
@@ -148,54 +172,31 @@ def chats():
 @chats.command("recent")
 @click.option("--limit", default=20, help="Number of chats to show.")
 @platform_option
-def chats_recent(limit: int, platform: str | None):
+@json_option
+def chats_recent(limit: int, platform: str | None, as_json: bool):
     """List recent chats."""
     rows = backends.recent_chats(limit, platform)
-    if not rows:
+    if as_json:
+        _print_json(rows)
+    elif rows:
+        _print_chats(rows, show_tags=platform is None, show_time=True)
+    else:
         click.echo("No chats found.")
-        return
-    show_tags = platform is None
-    name_width = max(len(r["name"]) for r in rows)
-    for r in rows:
-        name_col = click.style(r["name"].ljust(name_width), bold=True)
-        ts_col = click.style(_display_ts(r["last_message"]), fg=DIM)
-        extras = []
-        if show_tags:
-            extras.append(_platform_tag(r["platform"]))
-        if r["username"]:
-            extras.append(click.style(f"@{r['username']}", fg=DIM))
-        if r["phone"] and r["name"] != r["phone"]:
-            extras.append(click.style(r["phone"], fg=DIM))
-        extra = "  ".join(extras)
-        if extra:
-            extra = "  " + extra
-        click.echo(f"{name_col}  {ts_col}{extra}")
 
 
 @chats.command("find")
 @click.argument("query")
 @platform_option
-def chats_find(query: str, platform: str | None):
+@json_option
+def chats_find(query: str, platform: str | None, as_json: bool):
     """Find chats by name, phone, or username."""
     rows = backends.find_chats(query, platform)
-    if not rows:
+    if as_json:
+        _print_json(rows)
+    elif rows:
+        _print_chats(rows, show_tags=platform is None, show_time=False)
+    else:
         click.echo("No chats found.")
-        return
-    show_tags = platform is None
-    name_width = max(len(r["name"]) for r in rows)
-    for r in rows:
-        name_col = click.style(r["name"].ljust(name_width), bold=True)
-        extras = []
-        if show_tags:
-            extras.append(_platform_tag(r["platform"]))
-        if r["username"]:
-            extras.append(click.style(f"@{r['username']}", fg=DIM))
-        if r["phone"] and r["name"] != r["phone"]:
-            extras.append(click.style(r["phone"], fg=DIM))
-        extra = "  ".join(extras)
-        if extra:
-            extra = "  " + extra
-        click.echo(f"{name_col}{extra}")
 
 
 # --- read ---
@@ -206,14 +207,18 @@ def chats_find(query: str, platform: str | None):
 @click.option("--limit", default=20, help="Number of messages to show.")
 @click.option("--full", is_flag=True, help="Show full message text without truncation.")
 @platform_option
-def read_cmd(identifier: str, limit: int, full: bool, platform: str | None):
+@json_option
+def read_cmd(identifier: str, limit: int, full: bool, platform: str | None, as_json: bool):
     """Read messages from a chat. Accepts names, phones, or chat IDs."""
-    messages = backends.read_messages(identifier, limit, platform)
-    if not messages:
+    _chat, messages = backends.read_messages(identifier, limit, platform)
+    messages = list(reversed(messages))
+    if as_json:
+        _print_json(messages)
+    elif messages:
+        for m in messages:
+            click.echo(_format_message(m, full))
+    else:
         click.echo("No messages found.")
-        return
-    for m in reversed(messages):
-        click.echo(_format_message(m, full))
 
 
 # --- search ---
@@ -224,60 +229,45 @@ def read_cmd(identifier: str, limit: int, full: bool, platform: str | None):
 @click.option("--limit", default=20, help="Number of results to show.")
 @click.option("--full", is_flag=True, help="Show full message text without truncation.")
 @click.option("--chat", default=None, help="Scope search to a specific chat (name, phone, or ID).")
-@click.option("--context", "-C", default=0, type=int, help="Show N surrounding messages for each hit.")
+@click.option("--context", "-C", default=0, type=click.IntRange(min=0), help="Show N surrounding messages for each hit.")
 @platform_option
-def search_cmd(query: str, limit: int, full: bool, chat: str | None, context: int, platform: str | None):
+@json_option
+def search_cmd(
+    query: str, limit: int, full: bool, chat: str | None, context: int,
+    platform: str | None, as_json: bool,
+):
     """Search message content across platforms."""
-    results = backends.search_messages(query, limit, platform, chat=chat)
-    if not results:
+    hits = backends.search_messages(query, limit, platform, chat=chat)
+    if as_json:
+        if context:
+            _print_json([
+                {**h.to_dict(), "context": [m.to_dict() for m in backends.read_around(h, context)]}
+                for h in hits
+            ])
+        else:
+            _print_json(hits)
+        return
+    if not hits:
         click.echo("No messages found.")
         return
     show_tags = platform is None
 
-    if context <= 0:
-        for r in results:
-            ts = click.style(_display_ts(r["timestamp"]), fg=DIM)
-            chat_col = click.style(r["chat_name"], fg=SENDER_OTHER)
-            sender_text = r["sender"] if r["sender"] == "Me" else format_phone(r["sender"])
-            sender = click.style(sender_text, fg=SENDER_ME if r["sender"] == "Me" else SENDER_OTHER)
-            text = _truncate(r["text"], full)
-            tag = f"  {_platform_tag(r['platform'])}" if show_tags else ""
-            click.echo(f"{ts}  {chat_col}  {sender}  {text}{tag}")
+    if not context:
+        for h in hits:
+            click.echo(_format_hit(h, full, show_tags))
         return
 
-    # Context mode: fetch surrounding messages for each hit
-    for i, r in enumerate(results):
+    for i, h in enumerate(hits):
         if i > 0:
             click.echo()
-        tag = f" {_platform_tag(r['platform'])}" if show_tags else ""
-        click.echo(click.style(f"--- {r['chat_name']}{tag} ---", fg=DIM))
-
-        chat_msgs = backends.read_messages(r["chat_id"], context * 2 + 50, r["platform"])
-        # Messages come newest-first; reverse to chronological
-        chat_msgs = list(reversed(chat_msgs))
-
-        # Find the matching message by timestamp
-        hit_idx = None
-        hit_ts = r["timestamp"]
-        for j, m in enumerate(chat_msgs):
-            if m["timestamp"] == hit_ts:
-                hit_idx = j
-                break
-
-        if hit_idx is None:
-            # Fallback: show just the search result
-            click.echo(_format_message(r, full))
-            continue
-
-        start = max(0, hit_idx - context)
-        end = min(len(chat_msgs), hit_idx + context + 1)
-        for j in range(start, end):
-            m = chat_msgs[j]
+        tag = f" {_platform_tag(h.platform)}" if show_tags else ""
+        click.echo(click.style(f"--- {h.chat_name}{tag} ---", fg=DIM))
+        surrounding = backends.read_around(h, context) or [h]
+        for m in surrounding:
             line = _format_message(m, full)
-            if j == hit_idx:
-                click.echo(f"{line}  {click.style('<--', fg='yellow')}")
-            else:
-                click.echo(line)
+            if m.id == h.id:
+                line += f"  {click.style('<--', fg='yellow')}"
+            click.echo(line)
 
 
 # --- send ---
@@ -290,16 +280,15 @@ def search_cmd(query: str, limit: int, full: bool, chat: str | None, context: in
 @platform_option
 def send_cmd(recipient: str, message: str, confirm: bool, platform: str | None):
     """Send a message. Requires --confirm flag."""
+    backend, target = backends.resolve_send_target(recipient, platform)
     if not confirm:
-        plat, display = backends.resolve_send_target(recipient, platform)
-        tag = _platform_tag(plat)
-        if plat == "messages":
-            display = format_phone(display)
-        click.echo(f"Would send {tag} to {click.style(display, fg=SENDER_OTHER)}: {message}")
+        display = click.style(format_phone(target.display), fg=SENDER_OTHER)
+        if target.detail and target.detail != target.display:
+            display += click.style(f" ({target.detail})", fg=DIM)
+        click.echo(f"Would send {_platform_tag(backend.name)} to {display}: {message}")
         click.echo(f"Pass {click.style('--confirm', bold=True)} to actually send.")
         return
-    plat, result = backends.send_message(recipient, message, platform)
-    click.echo(result)
+    click.echo(backend.send_message(target, message))
 
 
 # --- stats ---
@@ -307,14 +296,19 @@ def send_cmd(recipient: str, message: str, confirm: bool, platform: str | None):
 
 @cli.command("stats")
 @platform_option
-def stats_cmd(platform: str | None):
+@json_option
+def stats_cmd(platform: str | None, as_json: bool):
     """Show message database statistics."""
     rows = backends.stats(platform)
+    if as_json:
+        _print_json(rows)
+        return
     if not rows:
         click.echo("No platforms available.")
         return
+    width = max(len(r["platform"]) for r in rows)
     for r in rows:
-        label = click.style(r["platform"], bold=True)
+        label = click.style(r["platform"].ljust(width), bold=True)
         click.echo(f"{label}  Messages: {r['messages']:,}  Chats: {r['chats']:,}")
 
 
@@ -329,10 +323,29 @@ def auth():
 @auth.command("whatsapp")
 def auth_whatsapp():
     """Authenticate with WhatsApp (QR code pairing)."""
-    whatsapp_auth.run_auth()
+    raise SystemExit(whatsapp_auth.run_auth())
 
 
 @auth.command("messenger")
 def auth_messenger():
     """Authenticate with Facebook Messenger (browser login)."""
     messenger_auth.run_auth()
+
+
+# --- setup ---
+
+
+@cli.command("setup")
+def setup_cmd():
+    """Build the Go helper tools (WhatsApp send/auth, Messenger pagination)."""
+    source = go_source_dir()
+    if source is None:
+        raise click.ClickException("Go sources not found in this installation.")
+    if shutil.which("go") is None:
+        raise click.ClickException("Go is not installed. Install it with: brew install go")
+    INSTALLED_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    click.echo(f"Building Go tools into {INSTALLED_BIN_DIR} ...")
+    result = subprocess.run(["go", "build", "-o", f"{INSTALLED_BIN_DIR}/", "./cmd/..."], cwd=source)
+    if result.returncode != 0:
+        raise click.ClickException("go build failed.")
+    click.echo("Done.")

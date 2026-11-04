@@ -16,21 +16,25 @@ All commands work across platforms by default. Use `--platform/-p` to filter by 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv run messages --help
+uv run messages --help          # from a checkout
+uv tool install .               # or install the `messages` command globally
 ```
+
+### Go helper tools
+
+WhatsApp sending and Messenger pagination use small Go programs in `go/cmd/`. Build them once (requires Go):
+
+```bash
+messages setup
+```
+
+This builds `wa-auth`, `wa-send`, `fb-fetch`, and `fb-threads` into `~/.local/share/messages-cli/bin`. The CLI also finds binaries in `$MESSAGES_CLI_BIN_DIR`, in `go/bin/` of a checkout (`cd go && go build -o bin/ ./cmd/...`), and on `PATH`.
 
 ### WhatsApp sending setup
 
-Reading WhatsApp messages works out of the box (reads the WhatsApp Desktop database directly). To enable sending, you need to authenticate once:
+Reading WhatsApp messages works out of the box (reads the WhatsApp Desktop database directly). To enable sending, run `messages setup` and pair once:
 
 ```bash
-# Build the auth tool (requires Go)
-cd wa-auth-tool && go build -o wa-auth && cd ..
-
-# Build the send tool
-cd wa-send-tool && go build -o wa-send && cd ..
-
-# Authenticate by scanning a QR code with your phone
 messages auth whatsapp
 ```
 
@@ -39,15 +43,12 @@ This creates a session at `~/.whatsapp-cli/whatsapp.db`. You only need to do thi
 ### Messenger setup
 
 ```bash
-# Build the pagination tools (requires Go)
-cd fb-fetch-tool && go build -o fb-fetch && cd ..
-cd fb-threads-tool && go build -o fb-threads && cd ..
-
-# Log in via browser to extract cookies
 messages auth messenger
 ```
 
-Cookies are saved to `~/.config/messages-cli/messenger_cookies.json`. The Go binaries are only needed for pagination: fb-fetch loads older messages within a thread, fb-threads discovers older threads beyond the initial ~15 from the inbox sync. Basic reading and sending work without them.
+Cookies are saved to `~/.config/messages-cli/messenger_cookies.json`. The Go tools are only needed for pagination: fb-fetch loads older messages within a thread, fb-threads discovers older threads beyond the initial ~15 from the inbox sync. Basic reading and sending work without them.
+
+When a command runs across all platforms, Messenger is only checked against the ~15 threads from the inbox sync, because paging through every thread can take minutes. Use `-p messenger` to search all threads.
 
 On first run, fb-threads automatically registers an E2EE device with Facebook's Signal Protocol infrastructure (ICDC) to access end-to-end encrypted threads. Device keys are persisted in `~/.config/messages-cli/messenger_e2ee.db`.
 
@@ -118,7 +119,7 @@ $ messages search "dinner" --context 2
 
 ### Send a message
 
-Dry-run by default. Pass `--confirm` to actually send.
+Dry-run by default. Pass `--confirm` to actually send. If a name matches several different people, the command stops and asks for a more specific name, phone number, or chat ID.
 
 ```bash
 $ messages send "Sarah" "Hey, are we still on for tomorrow?"
@@ -128,6 +129,27 @@ Pass --confirm to actually send.
 $ messages send "Alice" "See you at 3" -p whatsapp --confirm
 Message sent.
 ```
+
+### JSON output
+
+`chats recent`, `chats find`, `read`, `search`, `stats`, and `contacts search` accept `--json`.
+
+```bash
+$ messages read "Sarah" --limit 1 --json
+[
+  {
+    "id": "48213",
+    "timestamp": "2026-02-27T09:15:43+01:00",
+    "sender": "Sarah Chen",
+    "text": "Thanks for breakfast! [image: IMG_2041.heic]",
+    "is_from_me": false,
+    "edited": false,
+    "image_paths": ["/Users/me/Library/Messages/Attachments/.../IMG_2041.heic"]
+  }
+]
+```
+
+Search hits add `platform`, `chat_id`, and `chat_name`. With `--context N`, each hit also has a `context` list of surrounding messages.
 
 ### Search contacts
 
@@ -165,32 +187,30 @@ messenger   Messages: 1,204   Chats: 31
 ## Requirements
 
 - **Full Disk Access** -- Grant your terminal app Full Disk Access in System Settings > Privacy & Security. Required for reading the iMessage, Telegram, and WhatsApp databases.
-- **sqlcipher** -- `brew install sqlcipher`. Required for Telegram support.
-- **Go** -- Required to build the WhatsApp send/auth tools and the Messenger pagination tool. `brew install go`.
+- **Go** -- Required by `messages setup` to build the WhatsApp send/auth tools and the Messenger pagination tools. `brew install go`.
 - **WhatsApp Desktop** -- The native macOS app (not the web version). Required for WhatsApp reading.
 - **Messenger cookies** -- Run `messages auth messenger` to log in via browser. Required for Messenger support.
 
 ## How it works
 
-**Messages** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) directly for reading. Sends via AppleScript. Resolves phone numbers to contact names, shows reactions and attachments, formats phone numbers by country code. Image attachments are returned as local file paths from `~/Library/Messages/Attachments/`.
+**Messages** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) read-only. Message text is decoded from `attributedBody` when the plain `text` column is empty, which is the case for most messages on recent macOS versions. Sends via AppleScript to the existing chat (iMessage, SMS, RCS, or group), or over iMessage to a contact with no chat yet. Resolves phone numbers to contact names, shows reactions and attachments, formats phone numbers by country code. Image attachments are returned as local file paths from `~/Library/Messages/Attachments/`.
 
-**Telegram** -- Decrypts the local Telegram database (SQLCipher-encrypted postbox) for reading. For sending, it extracts the persistent MTProto auth key from the local database and uses Telethon to make API calls, no separate login needed. Image attachments are resolved from the local media cache by parsing photo resource IDs from the binary message format.
+**Telegram** -- Opens the local Telegram database (SQLCipher-encrypted postbox) read-only with the bundled `sqlcipher3` library. Pages are decrypted in memory and no plaintext copy is written to disk. For sending, it extracts the persistent MTProto auth key from the local database and uses Telethon to make API calls, no separate login needed. Image attachments are resolved from the local media cache by parsing photo resource IDs from the binary message format.
 
-**WhatsApp** -- Reads the WhatsApp Desktop SQLite databases (`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/`) directly. Resolves contact names from the contacts database and group member tables. For sending, uses a Go binary (whatsmeow) with a one-time QR code pairing flow. Image attachments are returned as local file paths from the WhatsApp media cache.
+**WhatsApp** -- Reads the WhatsApp Desktop SQLite databases (`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/`) directly. Resolves contact names from the contacts database and group member tables. For sending, uses the `wa-send` Go binary (whatsmeow) with a one-time QR code pairing flow. The message text is passed on stdin. Image attachments are returned as local file paths from the WhatsApp media cache.
 
-**Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. Two Go binaries (using mautrix-meta) connect via Facebook's MQTT WebSocket protocol for pagination: fb-fetch pages through older messages within a thread, and fb-threads pages through the thread list itself (the initial Lightspeed sync only returns ~15 recent threads). fb-threads also registers an E2EE device via Facebook's ICDC protocol (Signal Protocol key exchange) to access end-to-end encrypted threads, which Facebook migrated most conversations to in 2023. E2EE 1-on-1 DMs are discovered by intercepting Lightspeed `createOpenToE2EEThreadLink` entries, and contact names are resolved via `GetContactsFullTask` over MQTT. Device keys are persisted locally in a SQLite database. Sends messages via Facebook's Lightspeed GraphQL API. Image attachments are downloaded from Facebook's CDN to `~/.cache/messages-cli/messenger/`.
+**Messenger** -- Authenticates with browser cookies extracted via a one-time login flow. Reads messages by fetching thread pages from messenger.com and parsing the embedded Lightspeed payloads. Two Go binaries (using mautrix-meta) connect via Facebook's MQTT WebSocket protocol for pagination: fb-fetch pages through older messages within a thread, and fb-threads pages through the thread list itself (the initial Lightspeed sync only returns ~15 recent threads). fb-threads also registers an E2EE device via Facebook's ICDC protocol (Signal Protocol key exchange) to access end-to-end encrypted threads, which Facebook migrated most conversations to in 2023. E2EE 1-on-1 DMs are discovered by intercepting Lightspeed `createOpenToE2EEThreadLink` entries, and contact names are resolved via `GetContactsFullTask` over MQTT. Device keys are persisted locally in a SQLite database. Sends messages via Facebook's Lightspeed GraphQL API. The GraphQL query ID is cached in `~/.cache/messages-cli/messenger_api.json` and rediscovered from the JS bundles when it goes stale. Search covers only the messages included in the inbox sync. Image attachments are downloaded from Facebook's CDN to `~/.cache/messages-cli/messenger/`.
 
-### Data format
+### Errors
 
-Message dicts from `read_messages()` include:
+Without `--platform`, a platform that fails (missing Full Disk Access, expired cookies, Telegram not installed) prints a warning to stderr and the command continues with the other platforms. With `--platform`, the error is reported and the command exits with status 1.
 
-- `timestamp` -- ISO 8601 with local timezone (e.g., `2026-03-10T11:09:49+01:00`)
-- `sender` -- display name or `"Me"`
-- `text` -- message content with attachment tags
-- `is_from_me` -- boolean
-- `image_paths` -- list of local file paths to image attachments
+## Development
 
-Chat/thread dicts from `recent_chats()` include `message_count` (per-thread message count) on iMessage, WhatsApp, and Telegram. Messenger's `all_threads()` returns `{"threads": [...], "has_more": bool}` indicating whether pagination was exhaustive.
+```bash
+uv run pytest
+uv run ruff check .
+```
 
 ## Support
 

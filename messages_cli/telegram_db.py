@@ -13,20 +13,20 @@ from __future__ import annotations
 
 import binascii
 import enum
+import functools
 import io
 import os
-import sqlite3
 import struct
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
-
-from .utils import format_ts
 
 import mmh3
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA512
+
+from .models import BackendError, Chat, Message, SearchHit
+from .utils import choose_chat, format_phone, format_ts, looks_like_phone, phone_key
+
+PLATFORM = "telegram"
 
 # Telegram App Store container
 _TG_CONTAINER = Path.home() / "Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
@@ -82,7 +82,7 @@ def _decrypt_key(key_path: Path, password: str = _DEFAULT_PASSWORD) -> tuple[byt
 
     calc_hash = _murmur(db_key + db_salt)
     if db_hash != calc_hash:
-        raise RuntimeError(
+        raise BackendError(
             f"Key integrity check failed (hash mismatch: {db_hash} != {calc_hash}). "
             "Is a local passcode set on Telegram?"
         )
@@ -90,33 +90,20 @@ def _decrypt_key(key_path: Path, password: str = _DEFAULT_PASSWORD) -> tuple[byt
     return db_key, db_salt
 
 
-def _decrypt_database(db_path: Path, db_key: bytes, db_salt: bytes) -> Path:
-    """Use sqlcipher CLI to export encrypted DB to a plaintext temp file."""
+def _open_encrypted(db_path: Path, db_key: bytes, db_salt: bytes):
+    """Open the SQLCipher database read-only, decrypting pages in memory."""
+    import sqlcipher3
+
+    conn = sqlcipher3.connect(db_path.as_uri() + "?mode=ro", uri=True)
     hex_key = binascii.hexlify(db_key + db_salt).decode()
-    plaintext_path = Path(tempfile.mktemp(suffix=".db"))
-
-    sql_commands = f"""
-PRAGMA key="x'{hex_key}'";
-PRAGMA cipher_plaintext_header_size=32;
-PRAGMA cipher_default_plaintext_header_size=32;
-ATTACH DATABASE '{plaintext_path}' AS plaintext KEY '';
-SELECT sqlcipher_export('plaintext');
-DETACH DATABASE plaintext;
-"""
-
-    result = subprocess.run(
-        ["sqlcipher", str(db_path)],
-        input=sql_commands,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"sqlcipher export failed: {result.stderr}")
-
-    if not plaintext_path.exists() or plaintext_path.stat().st_size == 0:
-        raise RuntimeError("sqlcipher produced empty output. Decryption may have failed.")
-
-    return plaintext_path
+    conn.execute(f"PRAGMA key=\"x'{hex_key}'\"")
+    conn.execute("PRAGMA cipher_plaintext_header_size=32")
+    try:
+        conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+    except sqlcipher3.DatabaseError as e:
+        conn.close()
+        raise BackendError(f"Could not decrypt the Telegram database: {e}") from e
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -660,9 +647,23 @@ def _peer_display_name(peer: dict) -> str:
     return "Unknown"
 
 
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+# t7 keys are peerId(i64) + namespace(i32) + timestamp(i32) + messageId(i32),
+# big-endian, so these byte ranges sort chronologically as blobs.
+_PEER_PREFIX = "substr(key, 1, 8)"
+_TIME_ORDER = "substr(key, 13, 8)"
+
+_EMPTY_PEER = {"first_name": "", "last_name": "", "username": "", "title": "", "phone": ""}
+
+
+def is_available() -> bool:
+    return _find_db_path() is not None and _find_key_path() is not None
+
 
 class TelegramDB:
     """Interface to the local Telegram macOS database."""
@@ -670,30 +671,63 @@ class TelegramDB:
     def __init__(self):
         self._db_path = _find_db_path()
         self._key_path = _find_key_path()
-        self._conn: sqlite3.Connection | None = None
-        self._plaintext_path: Path | None = None
+        self._conn = None
         self._peer_cache: dict[int, dict] = {}
+        self._all_peers: dict[int, dict] | None = None
         self._photo_cache: dict[int, str] | None = None
 
     @property
-    def available(self) -> bool:
-        return self._db_path is not None and self._key_path is not None
+    def conn(self):
+        if self._conn is None:
+            if self._db_path is None or self._key_path is None:
+                raise BackendError(
+                    "Telegram database not found. Is Telegram (App Store) installed and logged in?"
+                )
+            db_key, db_salt = _decrypt_key(self._key_path)
+            self._conn = _open_encrypted(self._db_path, db_key, db_salt)
+        return self._conn
 
-    def _ensure_connection(self):
+    def close(self):
         if self._conn is not None:
-            return
+            self._conn.close()
+            self._conn = None
 
-        if not self.available:
-            print(
-                "Error: Telegram database not found. "
-                "Is Telegram (App Store) installed and logged in?",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    # -- peers --------------------------------------------------------------
 
-        db_key, db_salt = _decrypt_key(self._key_path)
-        self._plaintext_path = _decrypt_database(self._db_path, db_key, db_salt)
-        self._conn = sqlite3.connect(str(self._plaintext_path))
+    def get_peer(self, peer_id: int) -> dict:
+        if peer_id not in self._peer_cache:
+            row = self.conn.execute("SELECT value FROM t2 WHERE key = ? LIMIT 1", (peer_id,)).fetchone()
+            self._peer_cache[peer_id] = (_parse_peer(row[0]) if row else None) or dict(_EMPTY_PEER)
+        return self._peer_cache[peer_id]
+
+    def _peers(self) -> dict[int, dict]:
+        if self._all_peers is None:
+            self._all_peers = {}
+            for peer_id, value in self.conn.execute("SELECT key, value FROM t2"):
+                peer = _parse_peer(value)
+                if peer is not None:
+                    self._all_peers[peer_id] = peer
+                    self._peer_cache[peer_id] = peer
+        return self._all_peers
+
+    def _peer_chat(self, peer_id: int, peer: dict, last_ts: int | None = None, count: int | None = None) -> Chat:
+        return Chat(
+            platform=PLATFORM,
+            id=str(peer_id),
+            name=_peer_display_name(peer),
+            last_message=format_ts(last_ts) if last_ts else "",
+            phone=format_phone(peer["phone"]) if peer.get("phone") else "",
+            username=peer.get("username", ""),
+            is_group=bool(peer.get("title")) and not peer.get("first_name"),
+            message_count=count,
+        )
+
+    def _sender(self, msg: dict, peer_id: int) -> str:
+        if not msg["incoming"]:
+            return "Me"
+        return _peer_display_name(self.get_peer(msg["author_id"] or peer_id))
+
+    # -- photos -------------------------------------------------------------
 
     def _get_photo_cache(self) -> dict[int, str]:
         if self._photo_cache is None:
@@ -703,309 +737,133 @@ class TelegramDB:
         return self._photo_cache
 
     def _resolve_image_paths(self, msg: dict) -> list[str]:
-        """Resolve image file paths from message media data."""
-        tags = msg.get("tags", 0)
-        if not (tags & 1):  # bit 0 = PhotoOrVideo
+        if not (msg.get("tags", 0) & 1):  # bit 0 = PhotoOrVideo
             return []
-        post_text = msg.get("_post_text", b"")
-        if not post_text:
-            return []
-        rids = _extract_photo_resource_ids(post_text)
+        rids = _extract_photo_resource_ids(msg.get("_post_text", b""))
         if not rids:
             return []
         cache = self._get_photo_cache()
-        # Deduplicate (representations share the same resource ID)
-        seen = set()
-        paths = []
-        for rid in rids:
-            if rid in seen:
-                continue
-            seen.add(rid)
-            path = cache.get(rid)
-            if path:
-                paths.append(path)
-        return paths
+        # Representations of one photo share a resource ID
+        return [cache[rid] for rid in dict.fromkeys(rids) if rid in cache]
 
-    def close(self):
-        if self._conn:
-            self._conn.close()
-            self._conn = None
-        if self._plaintext_path and self._plaintext_path.exists():
-            self._plaintext_path.unlink()
-            self._plaintext_path = None
+    # -- chats --------------------------------------------------------------
 
-    def _get_peer(self, peer_id: int) -> dict:
-        if peer_id in self._peer_cache:
-            return self._peer_cache[peer_id]
-
-        self._ensure_connection()
-        row = self._conn.execute(
-            "SELECT value FROM t2 WHERE key = ? LIMIT 1", (peer_id,)
-        ).fetchone()
-
-        if row is None:
-            result = {"first_name": "", "last_name": "", "username": "", "title": "", "phone": ""}
-        else:
-            result = _parse_peer(row[0]) or {"first_name": "", "last_name": "", "username": "", "title": "", "phone": ""}
-
-        self._peer_cache[peer_id] = result
-        return result
-
-    def recent_chats(self, limit: int = 20) -> list[dict]:
-        """List recent chats with peer names and last message time."""
-        self._ensure_connection()
-
-        rows = self._conn.execute("SELECT key FROM t7").fetchall()
-
-        # Find the most recent timestamp and message count per peer
-        peer_latest: dict[int, int] = {}
-        peer_count: dict[int, int] = {}
-        for (key,) in rows:
-            parsed = _parse_message_key(key)
-            pid = parsed["peer_id"]
-            ts = parsed["timestamp"]
-            if pid not in peer_latest or ts > peer_latest[pid]:
-                peer_latest[pid] = ts
-            peer_count[pid] = peer_count.get(pid, 0) + 1
-
-        # Sort by most recent timestamp
-        sorted_peers = sorted(peer_latest.items(), key=lambda x: x[1], reverse=True)[:limit]
-
+    def recent_chats(self, limit: int = 20) -> list[Chat]:
+        rows = self.conn.execute(
+            f"""
+            SELECT {_PEER_PREFIX} AS peer, MAX(substr(key, 13, 4)) AS last_ts, COUNT(*) AS n
+            FROM t7 GROUP BY peer ORDER BY last_ts DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
         chats = []
-        for peer_id, last_ts in sorted_peers:
-            peer = self._get_peer(peer_id)
-            name = _peer_display_name(peer)
-            ts = format_ts(last_ts)
-            chats.append({
-                "peer_id": peer_id,
-                "name": name,
-                "username": peer.get("username", ""),
-                "phone": peer.get("phone", ""),
-                "last_message": ts,
-                "message_count": peer_count.get(peer_id, 0),
-            })
-
+        for peer_blob, ts_blob, count in rows:
+            peer_id = struct.unpack(">q", peer_blob)[0]
+            last_ts = struct.unpack(">i", ts_blob)[0]
+            chats.append(self._peer_chat(peer_id, self.get_peer(peer_id), last_ts, count))
         return chats
 
-    def find_chats(self, query: str) -> list[dict]:
-        """Find chats by name, username, or phone substring."""
-        import re as _re
-        self._ensure_connection()
-        query_lower = query.lower()
-        query_digits = _re.sub(r"\D", "", query)
-
-        # Get all known peers from t2
-        rows = self._conn.execute("SELECT key, value FROM t2").fetchall()
-
+    def find_chats(self, query: str) -> list[Chat]:
+        """Find chats by name, username, or phone number."""
+        wanted = query.strip().lstrip("@").casefold()
+        key = phone_key(query) if looks_like_phone(query) else ""
         results = []
-        for peer_id, value in rows:
-            peer = _parse_peer(value)
-            if peer is None:
-                continue
-            self._peer_cache[peer_id] = peer
-            name = _peer_display_name(peer)
-            searchable = f"{name} {peer.get('username', '')} {peer.get('phone', '')}".lower()
-            # Match by text substring or by phone digits
-            phone_digits = _re.sub(r"\D", "", peer.get("phone", ""))
-            if query_lower in searchable or (query_digits and query_digits in phone_digits):
-                results.append({
-                    "peer_id": peer_id,
-                    "name": name,
-                    "username": peer.get("username", ""),
-                    "phone": peer.get("phone", ""),
-                    "is_group": bool(peer.get("title")) and not peer.get("first_name"),
-                })
-
+        for peer_id, peer in self._peers().items():
+            searchable = f"{_peer_display_name(peer)} {peer.get('username', '')}".casefold()
+            if wanted in searchable or (key and key in phone_key(peer.get("phone", ""))):
+                results.append(self._peer_chat(peer_id, peer))
         return results
 
-    def find_peer_by_phone(self, phone_digits: str) -> int | None:
-        """Find a peer_id by phone number digits."""
-        self._ensure_connection()
-        import re
-        digits = re.sub(r"\D", "", phone_digits)
-        if not digits:
-            return None
-        rows = self._conn.execute("SELECT key, value FROM t2").fetchall()
-        for peer_id, value in rows:
-            peer = _parse_peer(value)
-            if peer is None:
-                continue
-            self._peer_cache[peer_id] = peer
-            peer_phone = re.sub(r"\D", "", peer.get("phone", ""))
-            if peer_phone and digits in peer_phone:
-                return peer_id
-        return None
-
-    def resolve_identifier(self, identifier: str) -> int | None:
-        """Resolve a name, phone, or peer_id string to a peer_id int."""
-        import re
+    def resolve_chat(self, identifier: str, strict: bool = False) -> Chat | None:
         stripped = identifier.strip()
-        # Pure digits and large -> treat as peer_id directly
-        if stripped.isdigit() and int(stripped) > 100000:
-            return int(stripped)
-        # Contains digits -> try phone lookup
-        if re.search(r"\d", stripped):
-            result = self.find_peer_by_phone(stripped)
-            if result is not None:
-                return result
-        # Name lookup
-        matches = self.find_chats(stripped)
-        if not matches:
+        if stripped.lstrip("-").isdigit() and int(stripped) in self._peers():
+            peer_id = int(stripped)
+            return self._peer_chat(peer_id, self._peers()[peer_id])
+        return choose_chat(stripped, self.find_chats(stripped), strict)
+
+    # -- messages -----------------------------------------------------------
+
+    def _to_message(self, key: bytes, value: bytes) -> Message | None:
+        idx = _parse_message_key(key)
+        msg = _parse_message_value(value)
+        if msg is None:
             return None
-        if len(matches) == 1:
-            return matches[0]["peer_id"]
-        # Multiple matches - prefer direct 1-on-1 chats over groups
-        direct = [m for m in matches if not m["is_group"]]
-        if len(direct) == 1:
-            return direct[0]["peer_id"]
-        raise SystemExit(
-            f'Multiple chats match "{identifier}". '
-            "Specify a phone number or peer ID instead."
+        image_paths = self._resolve_image_paths(msg)
+        text = msg["text"] or " ".join("[image]" for _ in image_paths)
+        if not text:
+            return None
+        return Message(
+            id=key.hex(),
+            timestamp=format_ts(idx["timestamp"]),
+            sender=self._sender(msg, idx["peer_id"]),
+            text=text,
+            is_from_me=not msg["incoming"],
+            image_paths=image_paths,
         )
 
-    def read_messages(self, peer_id: int, limit: int = 20) -> list[dict]:
-        """Read messages from a specific chat."""
-        self._ensure_connection()
+    def _messages(self, sql: str, params: tuple) -> list[Message]:
+        return [m for key, value in self.conn.execute(sql, params) if (m := self._to_message(key, value))]
 
-        # Match messages by peer_id prefix (first 8 bytes of the 20-byte key)
-        prefix = struct.pack(">q", peer_id)
+    def read_messages(self, peer_id: int, limit: int = 20) -> list[Message]:
+        """Most recent messages in a chat, newest first."""
+        return self._messages(
+            f"SELECT key, value FROM t7 WHERE {_PEER_PREFIX} = ? ORDER BY {_TIME_ORDER} DESC LIMIT ?",
+            (struct.pack(">q", peer_id), limit * 2 + 10),
+        )[:limit]
 
-        rows = self._conn.execute(
-            "SELECT key, value FROM t7 WHERE substr(key, 1, 8) = ? ORDER BY key DESC LIMIT ?",
-            (prefix, limit),
-        ).fetchall()
+    def read_around(self, message_id: str, count: int) -> list[Message]:
+        """Up to `count` messages before and after a message, in chronological order."""
+        key = bytes.fromhex(message_id)
+        prefix, position, window = key[:8], key[12:20], count * 2 + 10
+        older = self._messages(
+            f"""SELECT key, value FROM t7 WHERE {_PEER_PREFIX} = ? AND {_TIME_ORDER} <= ?
+            ORDER BY {_TIME_ORDER} DESC LIMIT ?""",
+            (prefix, position, window),
+        )[: count + 1]
+        newer = self._messages(
+            f"""SELECT key, value FROM t7 WHERE {_PEER_PREFIX} = ? AND {_TIME_ORDER} > ?
+            ORDER BY {_TIME_ORDER} ASC LIMIT ?""",
+            (prefix, position, window),
+        )[:count]
+        return list(reversed(older)) + newer
 
-        messages = []
-        for key, value in rows:
-            idx = _parse_message_key(key)
+    def search_messages(self, query: str, limit: int = 20, peer_id: int | None = None) -> list[SearchHit]:
+        """Search message text, newest first."""
+        wanted = query.casefold()
+        sql = "SELECT key, value FROM t7"
+        params: tuple = ()
+        if peer_id is not None:
+            sql += f" WHERE {_PEER_PREFIX} = ?"
+            params = (struct.pack(">q", peer_id),)
+        sql += f" ORDER BY {_TIME_ORDER} DESC"
+
+        hits = []
+        for key, value in self.conn.execute(sql, params):
             msg = _parse_message_value(value)
-            if msg is None:
+            if msg is None or not msg["text"] or wanted not in msg["text"].casefold():
                 continue
-
-            image_paths = self._resolve_image_paths(msg)
-            text = msg["text"]
-            if image_paths and not text:
-                text = " ".join(f"[image]" for _ in image_paths)
-            if not text and not image_paths:
-                continue
-
-            # Resolve sender
-            if msg["incoming"]:
-                author_id = msg["author_id"] or idx["peer_id"]
-                author_peer = self._get_peer(author_id)
-                sender = _peer_display_name(author_peer)
-            else:
-                sender = "Me"
-
-            ts = format_ts(idx["timestamp"])
-
-            messages.append({
-                "timestamp": ts,
-                "sender": sender,
-                "text": text,
-                "edited": False,
-                "is_from_me": not msg["incoming"],
-                "peer_id": idx["peer_id"],
-                "message_id": idx["message_id"],
-                "image_paths": image_paths,
-            })
-
-        return messages
-
-    def search_messages(self, query: str, limit: int = 50, peer_id: int | None = None) -> list[dict]:
-        """Search all messages for a text substring, optionally scoped to a peer."""
-        self._ensure_connection()
-        query_lower = query.lower()
-
-        rows = self._conn.execute(
-            "SELECT key, value FROM t7 ORDER BY key DESC"
-        ).fetchall()
-
-        results = []
-        for key, value in rows:
-            if len(results) >= limit:
+            idx = _parse_message_key(key)
+            hits.append(SearchHit(
+                id=key.hex(),
+                timestamp=format_ts(idx["timestamp"]),
+                sender=self._sender(msg, idx["peer_id"]),
+                text=msg["text"],
+                is_from_me=not msg["incoming"],
+                platform=PLATFORM,
+                chat_id=str(idx["peer_id"]),
+                chat_name=_peer_display_name(self.get_peer(idx["peer_id"])),
+            ))
+            if len(hits) >= limit:
                 break
-
-            msg = _parse_message_value(value)
-            if msg is None or not msg["text"]:
-                continue
-
-            if query_lower not in msg["text"].lower():
-                continue
-
-            idx = _parse_message_key(key)
-
-            if peer_id is not None and idx["peer_id"] != peer_id:
-                continue
-
-            peer = self._get_peer(idx["peer_id"])
-
-            if msg["incoming"]:
-                author_id = msg["author_id"] or idx["peer_id"]
-                author_peer = self._get_peer(author_id)
-                sender = _peer_display_name(author_peer)
-            else:
-                sender = "Me"
-
-            ts = format_ts(idx["timestamp"])
-
-            results.append({
-                "timestamp": ts,
-                "chat_name": _peer_display_name(peer),
-                "sender": sender,
-                "text": msg["text"],
-                "is_from_me": not msg["incoming"],
-                "peer_id": idx["peer_id"],
-            })
-
-        return results
-
-    def get_all_messages(self, since_timestamp: int = 0) -> list[dict]:
-        """Get all messages, optionally filtered by timestamp. For bulk export."""
-        self._ensure_connection()
-
-        rows = self._conn.execute(
-            "SELECT key, value FROM t7 ORDER BY key ASC"
-        ).fetchall()
-
-        messages = []
-        for key, value in rows:
-            idx = _parse_message_key(key)
-            if idx["timestamp"] < since_timestamp:
-                continue
-
-            msg = _parse_message_value(value)
-            if msg is None:
-                continue
-
-            # Resolve sender
-            if msg["incoming"]:
-                author_id = msg["author_id"] or idx["peer_id"]
-                author_peer = self._get_peer(author_id)
-                sender_name = _peer_display_name(author_peer)
-            else:
-                sender_name = None
-
-            peer = self._get_peer(idx["peer_id"])
-
-            image_paths = self._resolve_image_paths(msg)
-
-            messages.append({
-                "peer_id": idx["peer_id"],
-                "peer_name": _peer_display_name(peer),
-                "message_id": idx["message_id"],
-                "timestamp": idx["timestamp"],
-                "text": msg["text"],
-                "is_from_me": not msg["incoming"],
-                "sender_name": sender_name,
-                "image_paths": [str(p) for p in image_paths],
-            })
-
-        return messages
+        return hits
 
     def stats(self) -> dict:
-        """Get database statistics."""
-        self._ensure_connection()
-        msg_count = self._conn.execute("SELECT COUNT(*) FROM t7").fetchone()[0]
-        peer_count = self._conn.execute("SELECT COUNT(*) FROM t2").fetchone()[0]
-        return {"messages": msg_count, "peers": peer_count}
+        messages = self.conn.execute("SELECT COUNT(*) FROM t7").fetchone()[0]
+        chats = self.conn.execute(f"SELECT COUNT(DISTINCT {_PEER_PREFIX}) FROM t7").fetchone()[0]
+        return {"messages": messages, "chats": chats}
+
+
+@functools.cache
+def get_db() -> TelegramDB:
+    """Process-wide TelegramDB, so the database is opened once per command."""
+    return TelegramDB()

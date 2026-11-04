@@ -1,31 +1,14 @@
 """WhatsApp authentication via QR code pairing."""
 
 import subprocess
-import sys
-from pathlib import Path
 
-from .utils import WHATSAPP_SESSION_DIR
-
-_WA_AUTH_BIN = Path(__file__).parent.parent / "wa-auth-tool" / "wa-auth"
-SESSION_DIR = WHATSAPP_SESSION_DIR
+from .models import BackendError
+from .utils import WHATSAPP_SESSION_DIR, find_tool
 
 
-def run_auth() -> None:
-    """Run the wa-auth binary for QR code pairing.
-
-    This runs interactively, displaying a QR code in the terminal
-    for the user to scan with their phone.
-    """
-    if not _WA_AUTH_BIN.exists():
-        print(
-            f"wa-auth binary not found at {_WA_AUTH_BIN}. "
-            "Build it with: cd wa-auth-tool && go build -o wa-auth",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Run interactively (stdin/stdout/stderr pass through)
-    result = subprocess.run(
-        [str(_WA_AUTH_BIN), "--session", str(SESSION_DIR)],
-    )
-    sys.exit(result.returncode)
+def run_auth() -> int:
+    """Run wa-auth interactively so the QR code prints to this terminal."""
+    binary = find_tool("wa-auth")
+    if binary is None:
+        raise BackendError("wa-auth is not built. Run 'messages setup'.")
+    return subprocess.run([str(binary), "--session", str(WHATSAPP_SESSION_DIR)]).returncode

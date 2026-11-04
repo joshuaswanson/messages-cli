@@ -1,10 +1,14 @@
-module github.com/joshua/fb-fetch-tool
+module github.com/joshuaswanson/messages-cli/go
 
 go 1.26.0
 
 require (
+	github.com/mattn/go-sqlite3 v1.14.34
+	github.com/mdp/qrterminal v1.0.1
 	github.com/rs/zerolog v1.34.0
 	go.mau.fi/mautrix-meta v0.2602.0
+	go.mau.fi/whatsmeow v0.0.0-20260216124546-34b971e686b6
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -29,15 +33,14 @@ require (
 	github.com/yuin/goldmark v1.7.16 // indirect
 	go.mau.fi/libsignal v0.2.1 // indirect
 	go.mau.fi/util v0.9.6 // indirect
-	go.mau.fi/whatsmeow v0.0.0-20260216124546-34b971e686b6 // indirect
 	go.mau.fi/zeroconfig v0.2.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20260212183809-81e46e3db34a // indirect
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	maunium.net/go/mautrix v0.26.3 // indirect
+	rsc.io/qr v0.2.0 // indirect
 )
