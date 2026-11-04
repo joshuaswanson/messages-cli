@@ -57,3 +57,24 @@ def test_choose_chat_same_name_direct_chats_merge_unless_strict():
 def test_choose_chat_different_people_is_ambiguous():
     with pytest.raises(AmbiguousChatError):
         choose_chat("John", [_chat("John Smith"), _chat("John Doe")])
+
+
+def test_whatsapp_send_requires_paired_device(tmp_path, monkeypatch):
+    import sqlite3
+
+    from messages_cli import whatsapp_send
+
+    db_path = tmp_path / "whatsapp.db"
+    monkeypatch.setattr(whatsapp_send, "_SESSION_DB", db_path)
+    monkeypatch.setattr(whatsapp_send, "find_tool", lambda name: tmp_path / name)
+    assert "not paired" in whatsapp_send.unavailable_reason()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE whatsmeow_device (jid TEXT)")
+    conn.commit()
+    assert "not paired" in whatsapp_send.unavailable_reason()
+
+    conn.execute("INSERT INTO whatsmeow_device VALUES ('1:2@s.whatsapp.net')")
+    conn.commit()
+    conn.close()
+    assert whatsapp_send.unavailable_reason() is None

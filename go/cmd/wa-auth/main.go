@@ -1,71 +1,73 @@
+// wa-auth: pair a whatsmeow session with a phone by scanning a QR code.
+//
+// Usage: wa-auth [--session DIR]
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
+
+	"github.com/joshuaswanson/messages-cli/go/internal/wasession"
 )
+
+const connectTimeout = 20 * time.Second
+
+func fail(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}
 
 func main() {
 	sessionDir := flag.String("session", filepath.Join(os.Getenv("HOME"), ".whatsapp-cli"), "session directory")
 	flag.Parse()
 
 	ctx := context.Background()
-
-	// Ensure session directory exists
-	if err := os.MkdirAll(*sessionDir, 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create session directory: %v\n", err)
-		os.Exit(1)
+	if err := os.MkdirAll(*sessionDir, 0o700); err != nil {
+		fail("Failed to create session directory: %v", err)
 	}
-
-	dbPath := filepath.Join(*sessionDir, "whatsapp.db")
-	dbLog := waLog.Noop
-	container, err := sqlstore.New(ctx, "sqlite3", fmt.Sprintf("file:%s?_foreign_keys=on", dbPath), dbLog)
+	dbPath := wasession.DBPath(*sessionDir)
+	container, device, err := wasession.Open(ctx, *sessionDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open session store: %v\n", err)
-		os.Exit(1)
+		fail("%v", err)
 	}
+	wasession.UseLatestVersion(ctx)
+	client := whatsmeow.NewClient(device, waLog.Noop)
 
-	deviceStore, err := container.GetFirstDevice(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get device: %v\n", err)
-		os.Exit(1)
-	}
-
-	clientLog := waLog.Noop
-	client := whatsmeow.NewClient(deviceStore, clientLog)
-
-	if client.Store.ID != nil {
-		// Already paired
-		fmt.Println("Already authenticated.")
-		fmt.Printf("Session: %s\n", dbPath)
-		// Verify connection works
-		if err := client.Connect(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: connection test failed: %v\n", err)
-			os.Exit(1)
+	if device.ID != nil {
+		err := wasession.Connect(ctx, client, connectTimeout)
+		switch {
+		case err == nil:
+			client.Disconnect()
+			fmt.Println("Already authenticated. Connection verified.")
+			fmt.Printf("Session: %s\n", dbPath)
+			return
+		case errors.Is(err, wasession.ErrLoggedOut):
+			fmt.Println("The previous session was logged out on the phone. Pairing again.")
+			client = whatsmeow.NewClient(container.NewDevice(), waLog.Noop)
+		default:
+			fail("Connection test failed: %v", err)
 		}
-		client.Disconnect()
-		fmt.Println("Connection verified.")
-		return
 	}
 
-	// New login: QR pairing
 	fmt.Println("Scan the QR code below with WhatsApp on your phone:")
 	fmt.Println("Open WhatsApp > Settings > Linked Devices > Link a Device")
 	fmt.Println()
 
-	qrChan, _ := client.GetQRChannel(ctx)
+	qrChan, err := client.GetQRChannel(ctx)
+	if err != nil {
+		fail("Failed to start pairing: %v", err)
+	}
 	if err := client.Connect(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to connect: %v\n", err)
-		os.Exit(1)
+		fail("Failed to connect: %v", err)
 	}
 	defer client.Disconnect()
 
@@ -78,11 +80,9 @@ func main() {
 		}
 	}
 
-	if client.Store.ID != nil {
-		fmt.Println("\nAuthenticated successfully!")
-		fmt.Printf("Session saved to: %s\n", dbPath)
-	} else {
-		fmt.Fprintln(os.Stderr, "\nAuthentication failed or timed out.")
-		os.Exit(1)
+	if client.Store.ID == nil {
+		fail("\nAuthentication failed or timed out.")
 	}
+	fmt.Println("\nAuthenticated successfully!")
+	fmt.Printf("Session saved to: %s\n", dbPath)
 }

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,14 +17,13 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
-	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/joshuaswanson/messages-cli/go/internal/wasession"
 )
 
 const connectTimeout = 20 * time.Second
@@ -61,54 +61,30 @@ func main() {
 		fail("Invalid JID %q: server must be %s, %s, or %s", *to, types.DefaultUserServer, types.GroupServer, types.HiddenUserServer)
 	}
 
-	dbPath := filepath.Join(*sessionDir, "whatsapp.db")
+	dbPath := wasession.DBPath(*sessionDir)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		fail("Session not found at %s. Run 'messages auth whatsapp' first.", dbPath)
 	}
 
 	ctx := context.Background()
-	container, err := sqlstore.New(ctx, "sqlite3", fmt.Sprintf("file:%s?_foreign_keys=on", dbPath), waLog.Noop)
+	_, device, err := wasession.Open(ctx, *sessionDir)
 	if err != nil {
-		fail("Failed to open session: %v", err)
+		fail("%v", err)
 	}
-	deviceStore, err := container.GetFirstDevice(ctx)
-	if err != nil {
-		fail("Failed to get device: %v", err)
-	}
-	if deviceStore.ID == nil {
+	if device.ID == nil {
 		fail("Session is not paired. Run 'messages auth whatsapp' first.")
 	}
 
-	client := whatsmeow.NewClient(deviceStore, waLog.Noop)
-	connected := make(chan struct{}, 1)
-	loggedOut := make(chan struct{}, 1)
-	client.AddEventHandler(func(evt any) {
-		switch evt.(type) {
-		case *events.Connected:
-			select {
-			case connected <- struct{}{}:
-			default:
-			}
-		case *events.LoggedOut:
-			select {
-			case loggedOut <- struct{}{}:
-			default:
-			}
-		}
-	})
-
-	if err := client.Connect(); err != nil {
-		fail("Failed to connect: %v", err)
+	wasession.UseLatestVersion(ctx)
+	client := whatsmeow.NewClient(device, waLog.Noop)
+	err = wasession.Connect(ctx, client, connectTimeout)
+	if errors.Is(err, wasession.ErrLoggedOut) {
+		fail("WhatsApp session was logged out on the phone. Run 'messages auth whatsapp' to pair again.")
+	}
+	if err != nil {
+		fail("%v", err)
 	}
 	defer client.Disconnect()
-
-	select {
-	case <-connected:
-	case <-loggedOut:
-		fail("Session was logged out. Run 'messages auth whatsapp' again.")
-	case <-time.After(connectTimeout):
-		fail("Timed out waiting for WhatsApp connection")
-	}
 
 	msg := &waProto.Message{Conversation: proto.String(message)}
 	if _, err := client.SendMessage(ctx, jid, msg); err != nil {
