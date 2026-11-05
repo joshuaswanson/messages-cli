@@ -1,4 +1,9 @@
-# messages-cli
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-wordmark-dark.svg">
+    <img src="assets/logo-wordmark-light.svg" width="520" alt="Messages CLI: All your chats, one terminal.">
+  </picture>
+</p>
 
 Read, search, and send messages across iMessage, SMS/RCS, Telegram, WhatsApp, and Facebook Messenger from the terminal. macOS only.
 
@@ -205,7 +210,7 @@ messenger   Messages: 1,204   Chats: 31
 - **WhatsApp Desktop** -- The native macOS app (not the web version). Required for WhatsApp reading.
 - **Messenger cookies** -- Run `messages auth messenger` to log in via browser. Required for Messenger support.
 
-## How it works
+## Technical details
 
 **Messages** -- Queries the Messages SQLite database (`~/Library/Messages/chat.db`) read-only. Message text is decoded from `attributedBody` when the plain `text` column is empty, which is the case for most messages on recent macOS versions. Sends via AppleScript to the existing chat (iMessage, SMS, RCS, or group), or over iMessage to a contact with no chat yet. Resolves phone numbers to contact names, shows reactions and attachments, formats phone numbers by country code. Image attachments are returned as local file paths from `~/Library/Messages/Attachments/`.
 

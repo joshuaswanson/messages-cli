@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="32 40 820 192" width="820" height="192" role="img" aria-label="Messages CLI">
+  <defs>
+    <linearGradient id="w-front" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5EF08F"/><stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <linearGradient id="w-middle" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#239F69"/><stop offset="1" stop-color="#0E8AA3"/>
+    </linearGradient>
+    <linearGradient id="w-back" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#155C44"/><stop offset="1" stop-color="#0B4F61"/>
+    </linearGradient>
+    <path id="w-frontShape" d="M72 84 H168 A32 32 0 0 1 200 116 V164 A32 32 0 0 1 168 196 H100 L54 224 C46 212 40 196 40 176 V116 A32 32 0 0 1 72 84 Z"/>
+    <rect id="w-middleShape" x="60" y="66" width="160" height="112" rx="32"/>
+    <mask id="w-cutMiddle" maskUnits="userSpaceOnUse" x="0" y="0" width="300" height="300">
+      <rect width="300" height="300" fill="#fff"/>
+      <use href="#w-middleShape" fill="#000" stroke="#000" stroke-width="9" stroke-linejoin="round"/>
+    </mask>
+    <mask id="w-cutFront" maskUnits="userSpaceOnUse" x="0" y="0" width="300" height="300">
+      <rect width="300" height="300" fill="#fff"/>
+      <use href="#w-frontShape" fill="#000" stroke="#000" stroke-width="9" stroke-linejoin="round"/>
+    </mask>
+    <mask id="w-cutPrompt" maskUnits="userSpaceOnUse" x="0" y="0" width="300" height="300">
+      <rect width="300" height="300" fill="#fff"/>
+      <polyline points="84,120 106,140 84,160" fill="none" stroke="#000" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="120" y="151" width="42" height="12" rx="6" fill="#000"><animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.5;0.5;1" dur="1.2s" repeatCount="indefinite"/></rect>
+    </mask>
+  </defs>
+  <g mask="url(#w-cutMiddle)">
+    <rect x="80" y="48" width="160" height="112" rx="32" fill="url(#w-back)"/>
+  </g>
+  <g mask="url(#w-cutFront)">
+    <use href="#w-middleShape" fill="url(#w-middle)"/>
+  </g>
+  <g mask="url(#w-cutPrompt)">
+    <use href="#w-frontShape" fill="url(#w-front)"/>
+  </g>
+  <defs>
+    <linearGradient id="w-cli" gradientUnits="userSpaceOnUse" x1="670" y1="0" x2="815" y2="0">
+      <stop offset="0" stop-color="#16A34A"/><stop offset="1" stop-color="#0891B2"/>
+    </linearGradient>
+  </defs>
+  <text x="266" y="146" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-weight="700" font-size="84" letter-spacing="-1.5"><tspan fill="#0D1117">Messages</tspan><tspan dx="24" fill="url(#w-cli)">CLI</tspan></text>
+  <text x="272" y="198" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="32" font-weight="500" fill="#57606A">All your chats, one terminal.</text>
+</svg>
