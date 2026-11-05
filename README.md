@@ -100,10 +100,10 @@ Book Club   [ms]
 Accepts contact names, group chat names, phone numbers, or Telegram usernames. Auto-detects the platform unless `--platform` is specified.
 
 ```bash
-$ messages read "Sarah" --limit 3
-2026-02-27 08:10:00  Sarah Chen  Running 5 min late
+$ messages read "Nora" --limit 3
+2026-02-27 08:10:00  Nora Patel  Running 5 min late
 2026-02-27 08:12:30  Me          No worries, I'll grab us a table
-2026-02-27 09:15:43  Sarah Chen  Thanks for breakfast! [image: IMG_2041.heic]
+2026-02-27 09:15:43  Nora Patel  Thanks for breakfast! [image: IMG_2041.heic]
 
 $ messages read "Family Group" -p whatsapp --limit 3
 2026-02-27 10:00:00  Dad   Anyone free for dinner Sunday?
@@ -117,7 +117,7 @@ $ messages read "Family Group" -p whatsapp --limit 3
 $ messages search "dinner" --limit 3
 2026-02-27 18:30:00  John Smith    Me          Dinner at 7?           [ms]
 2026-02-26 12:15:00  Family Group  Dad         Dinner plans?          [wa]
-2026-02-25 09:00:00  Sarah Chen    Sarah Chen  Thanks for dinner!     [ms]
+2026-02-25 09:00:00  Nora Patel    Nora Patel  Thanks for dinner!     [ms]
 
 $ messages search "dinner" --chat "Family Group" -p whatsapp
 2026-02-26 12:15:00  Family Group  Dad  Dinner plans?
@@ -136,7 +136,7 @@ $ messages search "dinner" --context 2
 Dry-run by default. Pass `--confirm` to actually send. If a name matches several different people, the command stops and asks for a more specific name, phone number, or chat ID.
 
 ```bash
-$ messages send "Sarah" "Hey, are we still on for tomorrow?"
+$ messages send "Nora" "Hey, are we still on for tomorrow?"
 Would send [ms] to +1 415-555-9876: Hey, are we still on for tomorrow?
 Pass --confirm to actually send.
 
@@ -149,12 +149,12 @@ Message sent.
 `chats recent`, `chats find`, `read`, `search`, `stats`, and `contacts search` accept `--json`.
 
 ```bash
-$ messages read "Sarah" --limit 1 --json
+$ messages read "Nora" --limit 1 --json
 [
   {
     "id": "48213",
     "timestamp": "2026-02-27T09:15:43+01:00",
-    "sender": "Sarah Chen",
+    "sender": "Nora Patel",
     "text": "Thanks for breakfast! [image: IMG_2041.heic]",
     "is_from_me": false,
     "edited": false,
