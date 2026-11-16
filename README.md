@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo-wordmark-dark.svg">
-    <img src="assets/logo-wordmark-light.svg" width="520" alt="Messages CLI: All your chats, one terminal.">
+    <img src="assets/logo-wordmark-light.svg" width="420" alt="Messages CLI">
   </picture>
 </p>
 
